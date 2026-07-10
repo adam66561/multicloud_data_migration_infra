@@ -1,21 +1,19 @@
-name: Terraform Plan
+name: Bootstrapping Terraform Plan
 
 on:
   pull_request:
     branches:
       - main
     paths:
-      - "**/*.tf"
-      - "**/*.tfvars"
-      - ".terraform.lock.hcl"
-      - ".github/workflows/terraform-plan.yml"
+      - "bootstrapping/**"
+      - ".github/workflows/bootstrapping_plan.yml"
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: terraform-plan-${{ github.event.pull_request.number }}
+  group: bootstrapping-plan-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 env:

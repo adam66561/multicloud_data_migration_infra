@@ -1,21 +1,19 @@
-name: Terraform Apply
+name: Bootstrapping Terraform Apply
 
 on:
   push:
     branches:
       - main
     paths:
-      - "**/*.tf"
-      - "**/*.tfvars"
-      - ".terraform.lock.hcl"
-      - ".github/workflows/terraform-apply.yml"
+      - "bootstrapping/**"
+      - ".github/workflows/bootstrapping_apply.yml"
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: terraform-apply-main
+  group: bootstrapping-apply-main
   cancel-in-progress: false
 
 env:
