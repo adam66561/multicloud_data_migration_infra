@@ -30,9 +30,9 @@ module "terraform_state_bucket" {
   attach_require_latest_tls_policy      = true
 
   tags = {
-    name        = join(local.default_separator, ["tfstate", "s3", local.prefix, local.account_id, local.region])
-    env         = var.env
-    managedBy   = "Terraform"
-    purpose     = "Terraform state"
+    name      = join(local.default_separator, ["tfstate", "s3", local.prefix, local.account_id, local.region])
+    env       = var.env
+    managedBy = "Terraform"
+    purpose   = "Terraform state"
   }
 }
