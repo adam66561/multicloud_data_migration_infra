@@ -1,12 +1,11 @@
 name: Terraform Plan
 
 on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "infrastructure/**"
-      - ".github/workflows/plan.yml"
+  workflow_run:
+    workflows:
+      - Terraform Bootstrap Plan
+    types:
+      - completed
 
 permissions:
   contents: read

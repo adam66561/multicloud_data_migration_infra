@@ -1,12 +1,13 @@
 name: Terraform Apply
 
 on:
-  push:
+  workflow_run:
+    workflows:
+      - Terraform Bootstrap Apply
+    types:
+      - completed
     branches:
       - main
-    paths:
-      - "infrastructure/**"
-      - ".github/workflows/apply.yml"
 
 permissions:
   contents: read
