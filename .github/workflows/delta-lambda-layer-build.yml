@@ -4,7 +4,7 @@ on:
         branches:
           - main
         paths:
-            - "lambda_layers/delta-rs/requirements.txt"
+            - "infrastructure/lambda_layers/delta-rs/requirements.txt"
             - ".github/workflows/delta-lambda-layer-build.yml"
 permissions:
     id-token: write
@@ -24,7 +24,7 @@ jobs:
                 dnf install git zip unzip awscli -y                
             - uses: actions/checkout@v6
             - run: pip install --upgrade pip
-            - run: pip install --no-cache -r lambda_layers/delta-rs/requirements.txt -t asset/python/lib/python3.12/site-packages
+            - run: pip install --no-cache -r infrastructure/lambda_layers/delta-rs/requirements.txt -t asset/python/lib/python3.12/site-packages
             - working-directory: asset
               run: zip -r ../deltalake_layer.zip python -x "*.pyc" "*.pyo" "*__pycache__*" "*.dist-info*" "*.egg-info*" "tests" "docs" "examples" ".ruff_cache" ".mypy_cache" ".pytest_cache"
             - uses: aws-actions/configure-aws-credentials@v6
