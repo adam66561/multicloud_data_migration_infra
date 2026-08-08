@@ -1,8 +1,8 @@
 name: Deltalake lambda layer build
 on:
     workflow_dispatch:
-        branches:
-          - main
+    push:
+        branches: [ main ]
         paths:
             - "infrastructure/lambda_layers/delta-rs/requirements.txt"
             - ".github/workflows/delta-lambda-layer-build.yml"
