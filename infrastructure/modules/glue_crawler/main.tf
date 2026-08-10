@@ -1,5 +1,9 @@
-resource "aws_glue_catalog_database" "this" {
-  name = var.database_name
+resource "aws_glue_catalog_database" "pasx" {
+  name = "pasx"
+}
+
+resource "aws_glue_catalog_database" "wltuser" {
+  name = "wltuser"
 }
 
 resource "aws_iam_role" "crawler" {
@@ -67,13 +71,28 @@ resource "aws_iam_role_policy" "crawler" {
   })
 }
 
-resource "aws_glue_crawler" "this" {
-  name          = var.name
+resource "aws_glue_crawler" "pasx" {
+  name          = "${var.name}-pasx"
   role          = aws_iam_role.crawler.arn
-  database_name = aws_glue_catalog_database.this.name
+  database_name = aws_glue_catalog_database.pasx.name
 
   s3_target {
-    path = var.s3_path
+    path = "s3://dev-multicloud-lambda-tests/pasx/batchrecord/"
+  }
+
+  schema_change_policy {
+    update_behavior = "UPDATE_IN_DATABASE"
+    delete_behavior = "LOG"
+  }
+}
+
+resource "aws_glue_crawler" "wltuser" {
+  name          = "${var.name}-wltuser"
+  role          = aws_iam_role.crawler.arn
+  database_name = aws_glue_catalog_database.wltuser.name
+
+  s3_target {
+    path = "s3://dev-multicloud-lambda-tests/wltuser/lsvcharge/"
   }
 
   schema_change_policy {

@@ -1,7 +1,6 @@
 variable "prefix" { type = string }
 variable "glue_database_name" { type = list(string) }
 variable "glue_catalog_id" { type = string }
-variable "s3_objects" { type = list(string) }
 variable "destination_s3_bucket_id" { type = string }
 variable "destination_s3_bucket_arn" { type = string }
 

@@ -98,7 +98,7 @@ resource "aws_lambda_function" "this" {
   source_code_hash               = data.archive_file.this.output_base64sha256
   role                           = aws_iam_role.this.arn
   layers                         = [data.aws_lambda_layer_version.deltalake.arn]
-  reserved_concurrent_executions = 1
+#   reserved_concurrent_executions = 1
 
   environment {
     variables = {
