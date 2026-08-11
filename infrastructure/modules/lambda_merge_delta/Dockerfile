@@ -2,14 +2,14 @@ FROM public.ecr.aws/lambda/python:3.12 AS build
 
 COPY infrastructure/modules/lambda_merge_delta/requirements.txt  .
 
+RUN dnf install -y findutils && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
 RUN pip3 install --upgrade pip && \
     pip3 install -r requirements.txt --target "${LAMBDA_TASK_ROOT}"
 
 COPY infrastructure/modules/lambda_merge_delta/src/lambda_function.py ${LAMBDA_TASK_ROOT}
-
-RUN dnf update -y \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
 
 RUN chmod 644 $(find . -type f) && chmod 755 $(find . -type d)
 
