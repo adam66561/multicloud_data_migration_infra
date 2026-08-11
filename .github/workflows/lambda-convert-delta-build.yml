@@ -1,0 +1,41 @@
+name: Lambda image push - delta
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        default: "main"
+        required: true
+      target:
+        description: "Repository"
+        required: true
+permissions:
+     id-token: write
+     contents: read
+concurrency: "delta-lambda-image-push"
+jobs:
+  build_push:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 30
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: 'true'
+      - uses: actions/checkout@v6
+      - id: push-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_NAME: ${{ inputs.target }}
+          IMAGE_TAG: latest
+          DOCKERFILE: modules/lambda_convert_delta/Dockerfile
+          DOCKER_BUILDKIT: 0
+        run: |
+          docker build --pull --no-cache --rm -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAME }}:${{ env.IMAGE_TAG }} . -f ${{ env.DOCKERFILE }}
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAME }}:${{ env.IMAGE_TAG }}

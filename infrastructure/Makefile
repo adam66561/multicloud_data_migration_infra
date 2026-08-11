@@ -12,7 +12,7 @@ plan:
 plan_destroy:
 	terraform plan -destroy
 
-terraform_apply:
+apply:
 	terraform apply "terraform.planfile"
 
 destroy:
