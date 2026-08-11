@@ -1,0 +1,5 @@
+aws_lambda_powertools
+deltalake
+boto3
+pandas
+pyarrow

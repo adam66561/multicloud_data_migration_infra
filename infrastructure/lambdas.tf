@@ -15,3 +15,17 @@ module "lambda_convert_delta" {
   destination_s3_bucket_id  = module.lambda_tests.s3_bucket_id
   destination_s3_bucket_arn = module.lambda_tests.s3_bucket_arn
 }
+
+module "lambda_merge_delta" {
+  source = "./modules/lambda_merge_delta"
+  prefix = join(local.default_separator, [local.prefix, "lambda", "merge", "delta"])
+
+  glue_database_name = ["pasx", "wltuser"]
+  glue_catalog_id    = data.aws_caller_identity.current.account_id
+
+  destination_s3_bucket_id  = module.lambda_tests.s3_bucket_id
+  destination_s3_bucket_arn = module.lambda_tests.s3_bucket_arn
+
+  config_s3_bucket_id  = module.lambda_tests.s3_bucket_id
+  config_s3_bucket_arn = module.lambda_tests.s3_bucket_arn
+}
