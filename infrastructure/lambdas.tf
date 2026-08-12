@@ -29,3 +29,17 @@ module "lambda_merge_delta" {
   config_s3_bucket_id  = module.lambda_tests.s3_bucket_id
   config_s3_bucket_arn = module.lambda_tests.s3_bucket_arn
 }
+
+# module "lambda_merge_delta_wp" {
+#   source = "./modules/lambda_merge_delta_wp"
+#   prefix = join(local.default_separator, [local.prefix, "lambda", "merge", "delta", "wp"])
+
+#   glue_database_name = ["pasx", "wltuser"]
+#   glue_catalog_id    = data.aws_caller_identity.current.account_id
+
+#   destination_s3_bucket_id  = module.lambda_tests.s3_bucket_id
+#   destination_s3_bucket_arn = module.lambda_tests.s3_bucket_arn
+
+#   config_s3_bucket_id  = module.lambda_tests.s3_bucket_id
+#   config_s3_bucket_arn = module.lambda_tests.s3_bucket_arn
+# }

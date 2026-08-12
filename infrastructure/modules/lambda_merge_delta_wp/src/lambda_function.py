@@ -12,8 +12,8 @@ from typing import Any, Dict, List, Optional, Tuple, Literal
 from io import BytesIO
 from urllib.parse import unquote_plus
 
-import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 from deltalake import DeltaTable
 from deltalake.writer import write_deltalake
 
@@ -22,7 +22,6 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 BOTO3_SESSION = boto3.Session()
-S3_CLIENT = BOTO3_SESSION.client("s3")
 PRIMARY_KEYS_FILE_NAME = 'primary_keys.json'
 
 def load_primary_keys(s3_conf_bucket: str, s3_conf_key: str):
@@ -47,18 +46,32 @@ def reduce_events_for_key(events: List[Dict[str, Any]]) -> Optional[Dict[str, An
 
     return state
 
-def _run_merge_once(df: pd.DataFrame, full_s3_path: str, pk_cols: List[str], operation: Literal["upsert", "delete"]):
+def _is_null(value: Any) -> bool:
+    if value is None:
+        return True
+
+    if isinstance(value, float):
+        return math.isnan(value)
+
+    return False 
+
+# def _lowercase_arrow_columns(table: pa.Table) -> pa.Table:
+#     lower_names = [name.lower() for name in table.column_names]
+
+#     if lower_names == table.column_names:
+#         return table
+
+#     return table.rename_columns(lower_names)
+
+
+def _run_merge_once(source_table: pa.Table, full_s3_path: str, pk_cols: List[str], operation: Literal["upsert", "delete"]):
     dt = DeltaTable(full_s3_path)
     merge_predicate = " AND ".join([f"target.{c} = source.{c}" for c in pk_cols])
 
     if operation == "upsert":
-        source_table = pa.Table.from_pandas(
-            df,
-            preserve_index=False,
-        )
         col_map = {
-            c: f"source.{c}"
-            for c in df.columns
+            col: f"source.{col}"
+            for col in source_table.column_names
         }
         (
             dt.merge(
@@ -72,13 +85,10 @@ def _run_merge_once(df: pd.DataFrame, full_s3_path: str, pk_cols: List[str], ope
             .execute()
         )
     elif operation == "delete":
-        source_table = pa.Table.from_pandas(
-            df[pk_cols],
-            preserve_index=False,
-        )
+        delete_source = source_table.select(pk_cols)
         (
             dt.merge(
-                source=source_table,
+                source=delete_source,
                 predicate=merge_predicate,
                 source_alias="source",
                 target_alias="target",
@@ -94,7 +104,7 @@ def _run_merge_once(df: pd.DataFrame, full_s3_path: str, pk_cols: List[str], ope
 
 def _execute_delta_merge_with_retry(
     *,
-    df: pd.DataFrame,
+    source_table: pa.Table,
     full_s3_path: str,
     schema_name: str,
     table_name: str,
@@ -107,10 +117,9 @@ def _execute_delta_merge_with_retry(
     if not pk_cols:
         raise RuntimeError(f"No primary key defined for {table_key}")
 
-    df = df.copy()
-    df.columns = [c.lower() for c in df.columns]
+#    source_table = _lowercase_arrow_columns(source_table)
 
-    missing_pk = [c for c in pk_cols if c not in df.columns]
+    missing_pk = [c for c in pk_cols if c not in source_table.column_names]
     if missing_pk:
         raise RuntimeError(f"Dataframe missing PK columns for {table_key}: {missing_pk}")
 
@@ -121,7 +130,7 @@ def _execute_delta_merge_with_retry(
     for attempt in range(1, max_attempts + 1):
         try:
             last_dt, merge_predicate = _run_merge_once(
-                df=df,
+                source_table=source_table,
                 full_s3_path=full_s3_path,
                 pk_cols=pk_cols,
                 operation=operation,
@@ -147,10 +156,8 @@ def _execute_delta_merge_with_retry(
     logger.error(f"CRITICAL: Failed to {operation} in S3 Delta Table. Error: {last_exception}")
     if last_dt is not None:
         logger.info(f"Delta schema: {[f.name for f in last_dt.schema().fields]}")
-
     logger.info(f"PK cols: {pk_cols}")
     logger.info(f"Merge predicate: {merge_predicate}")
-
     if last_exception is None:
         raise RuntimeError(f"Unknown failure during {operation} for {full_s3_path}")
     raise last_exception
@@ -158,10 +165,8 @@ def _execute_delta_merge_with_retry(
 def _read_parquet_from_s3(
     bucket: str,
     key: str,
-) -> pd.DataFrame:
-    logger.info(
-        f"Reading Parquet file s3://{bucket}/{key}"
-    )
+) -> pa.Table:
+    logger.info(f"Reading Parquet file s3://{bucket}/{key}")
 
     response = S3_CLIENT.get_object(
         Bucket=bucket,
@@ -170,17 +175,13 @@ def _read_parquet_from_s3(
 
     parquet_bytes = response["Body"].read()
 
-    df = pd.read_parquet(
-        BytesIO(parquet_bytes),
-        engine="pyarrow",
-    )
+    table = pq.read_table(BytesIO(parquet_bytes))
 
     logger.info(
-        f"Read {len(df)} rows from "
-        f"s3://{bucket}/{key}"
+        f"Read {table.num_rows} rows from s3://{bucket}/{key}"
     )
 
-    return df
+    return table
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
@@ -323,8 +324,8 @@ def _extract_schema_table_from_s3_key(key: str) -> Tuple[str, str]:
     return parts[-3].lower(), parts[-2].lower()
 
 
-def build_final_states_from_parquet(
-    parquet_df: pd.DataFrame, 
+def build_final_states(
+    parquet_table: pa.Table, 
     schema_name: str, 
     table_name: str, 
     primary_keys: Dict[str, List[str]],
@@ -342,18 +343,12 @@ def build_final_states_from_parquet(
     if not pk_cols:
         raise RuntimeError(f"No primary key defined for {table_key}")
 
-    for row_number, row in enumerate(parquet_df.to_dict(orient="records"), start=1):
+    for row_number, row in enumerate(parquet_table.to_pylist(), start=1):
         try:
             operation = _extract_operation(row)
             business_data = _extract_business_data(row)
 
-            missing_pk = [
-                c for c in pk_cols
-                if (
-                    c not in business_data
-                    or pd.isna(business_data[c])
-                )
-            ]
+            missing_pk = [col for col in pk_cols if (col not in business_data or _is_null(business_data[col]))]
 
             if missing_pk:
                 raise RuntimeError(f"CDC row missing PK columns for {table_key}: {missing_pk}")
@@ -367,13 +362,13 @@ def build_final_states_from_parquet(
             else:
                 raise RuntimeError(f"Unsupported operation '{operation}' for {table_key}")
 
-            grouped[pk].append(
-                {
-                    "pk": pk,
-                    "op": normalized_op,
-                    "data": business_data,
-                }
-            )
+            event = {
+                "pk": pk,
+                "op": normalized_op,
+                "data": business_data,
+            }
+
+            grouped[pk].append(event)
 
         except Exception as exc:
             raise RuntimeError(f"Error processing Parquet row {row_number}: {exc}") from exc
@@ -385,15 +380,22 @@ def build_final_states_from_parquet(
         final_state = reduce_events_for_key(events)
 
         if final_state is None:
-            delete_row = {
-                col: pk[i]
-                for i, col in enumerate(pk_cols)
-            }
-            final_deletes.append(delete_row)
+            final_deletes.append(
+                {
+                    col: pk[index]
+                    for index, col in enumerate(pk_cols)
+                }
+            )
         else:
             final_upserts.append(final_state)
 
     return final_upserts, final_deletes
+
+
+def _rows_to_arrow_table(rows: List[Dict[str, Any]]) -> pa.Table:
+    if not rows:
+        return pa.table({})
+    return pa.Table.from_pylist(rows)
 
 
 def _process_s3_record(
@@ -432,11 +434,11 @@ def _process_s3_record(
 
     logger.info(f"Resolved source as {schema_name}.{table_name} from S3 key")
 
-    parquet_df = _read_parquet_from_s3(bucket=bucket, key=key)
+    parquet_table = _read_parquet_from_s3(bucket=bucket, key=key)
 
     upsert_buffer, deletes_buffer = (
         build_final_states_from_parquet(
-            parquet_df,
+            parquet_table,
             schema_name=schema_name,
             table_name=table_name,
             primary_keys=primary_keys,
@@ -447,24 +449,13 @@ def _process_s3_record(
         logger.info(f"No valid CDC rows found in s3://{bucket}/{key}")
         return
 
-    df_deletes = (
-        pd.DataFrame(deletes_buffer)
-        if deletes_buffer
-        else pd.DataFrame()
-    )
-
-    df_upsert = (
-        pd.DataFrame(upsert_buffer)
-        if upsert_buffer
-        else pd.DataFrame()
-    )
-
     base_path = s3_bucket_base_path.rstrip("/")
     full_s3_path = (f"{base_path}/{schema_name}/{table_name}/")
 
-    if not df_upsert.empty:
+    if upsert_buffer:
+        upsert_table = _rows_to_arrow_table(upsert_buffer)
         _execute_delta_merge_with_retry(
-            df=df_upsert,
+            df=upsert_table,
             full_s3_path=full_s3_path,
             schema_name=schema_name,
             table_name=table_name,
@@ -472,10 +463,10 @@ def _process_s3_record(
             operation="upsert",
             max_attempts=3,
         )
-
-    if not df_deletes.empty:
+    if deletes_buffer:
+        delete_table = _rows_to_arrow_table(deletes_buffer)
         _execute_delta_merge_with_retry(
-            df=df_deletes,
+            df=delete_table,
             full_s3_path=full_s3_path,
             schema_name=schema_name,
             table_name=table_name,
@@ -484,7 +475,7 @@ def _process_s3_record(
             max_attempts=3,
         )
 
-    total = (len(upsert_buffer)+ len(deletes_buffer) )
+    total = (len(upsert_buffer)+ len(deletes_buffer))
 
     logger.info(f"Successfully processed {total} CDC rows from s3://{bucket}/{key}for {schema_name}.{table_name}")
 

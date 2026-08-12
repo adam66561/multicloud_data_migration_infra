@@ -1,28 +1,23 @@
 import boto3
+import base64
 import json
-import logging
-import math
-import os
-import random
-import time
-
-# import base64
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple, Literal
-from io import BytesIO
-from urllib.parse import unquote_plus
-
 import pandas as pd
 import pyarrow as pa
+import logging
+import os
+import time
 from deltalake import DeltaTable
 from deltalake.writer import write_deltalake
-
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple, Literal
+import random
+from io import BytesIO
+from urllib.parse import unquote_plus
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 BOTO3_SESSION = boto3.Session()
-S3_CLIENT = BOTO3_SESSION.client("s3")
 PRIMARY_KEYS_FILE_NAME = 'primary_keys.json'
 
 def load_primary_keys(s3_conf_bucket: str, s3_conf_key: str):
@@ -47,19 +42,89 @@ def reduce_events_for_key(events: List[Dict[str, Any]]) -> Optional[Dict[str, An
 
     return state
 
+def build_final_states(kinesis_event: Dict[str, Any], primary_keys: Dict[str, List[str]],) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[str], Optional[str]]:
+    grouped = defaultdict(list)
+    schema_name = None
+    table_name = None
+
+    for record in kinesis_event["Records"]:
+        try:
+            record_data = base64.b64decode(record['kinesis']['data']).decode('utf-8')
+            record_json = json.loads(record_data)
+
+            data_obj = record_json.get("data", {}) or {}
+            if isinstance(data_obj, dict) and "_doc" in data_obj and isinstance(data_obj["_doc"], dict):
+                business_source = data_obj["_doc"]
+            else:
+                business_source = data_obj
+
+            business_data = {k.lower(): v for k, v in business_source.items()}
+            metadata = record_json.get('metadata', {})
+            operation = metadata.get('operation')
+            
+            schema_name_candidate = metadata.get('schema-name').lower()
+            table_name_candidate = metadata.get('table-name').lower()
+
+            table_key = f"{schema_name_candidate}.{table_name_candidate}".lower()
+            pk_cols = [c.lower() for c in primary_keys.get(table_key, [])]
+            if not pk_cols:
+                raise RuntimeError(f"No primary key defined for {table_key}")
+
+            missing_pk = [c for c in pk_cols if c not in business_data or business_data[c] is None]
+            if missing_pk:
+                raise RuntimeError(
+                    f"CDC event missing PK columns for {table_key}: {missing_pk}"
+                )
+            
+            pk = tuple(business_data[c] for c in pk_cols)
+
+            if operation in ("insert", "update"):
+                normalized_op = "UPSERT"
+            elif operation == "delete":
+                normalized_op = "DELETE"
+            else:
+                raise RuntimeError(f"Unsupported operation '{operation}' for {table_key}")
+
+            event = {
+                "pk": pk,
+                "op": normalized_op,
+                "data": business_data,
+            }
+
+            grouped[pk].append(event)
+            schema_name = schema_name_candidate
+            table_name = table_name_candidate
+
+        except Exception as e:
+            logger.error(f"Error decoding record: {e}")
+
+    final_upserts = []
+    final_deletes = []
+
+    for pk, events in grouped.items():
+        final_state = reduce_events_for_key(events)
+
+        if final_state is None:
+            delete_row = {}
+            table_key = f"{schema_name}.{table_name}".lower()
+            pk_cols = [c.lower() for c in primary_keys.get(table_key, [])]
+            for i, col in enumerate(pk_cols):
+                delete_row[col] = pk[i]
+            final_deletes.append(delete_row)
+        else:
+            final_upserts.append(final_state)
+
+    return final_upserts, final_deletes, schema_name, table_name
+
+
+
 def _run_merge_once(df: pd.DataFrame, full_s3_path: str, pk_cols: List[str], operation: Literal["upsert", "delete"]):
     dt = DeltaTable(full_s3_path)
     merge_predicate = " AND ".join([f"target.{c} = source.{c}" for c in pk_cols])
 
     if operation == "upsert":
-        source_table = pa.Table.from_pandas(
-            df,
-            preserve_index=False,
-        )
-        col_map = {
-            c: f"source.{c}"
-            for c in df.columns
-        }
+        source_table = pa.Table.from_pandas(df, preserve_index=False)
+        col_map = {c: f"source.{c}" for c in df.columns}
         (
             dt.merge(
                 source=source_table,
@@ -72,10 +137,7 @@ def _run_merge_once(df: pd.DataFrame, full_s3_path: str, pk_cols: List[str], ope
             .execute()
         )
     elif operation == "delete":
-        source_table = pa.Table.from_pandas(
-            df[pk_cols],
-            preserve_index=False,
-        )
+        source_table = pa.Table.from_pandas(df[pk_cols], preserve_index=False)
         (
             dt.merge(
                 source=source_table,
@@ -121,13 +183,16 @@ def _execute_delta_merge_with_retry(
     for attempt in range(1, max_attempts + 1):
         try:
             last_dt, merge_predicate = _run_merge_once(
-                df=df,
                 full_s3_path=full_s3_path,
+                df=df,
                 pk_cols=pk_cols,
                 operation=operation,
             )
 
-            logger.info(f"SUCCESS: {operation} completed for {full_s3_path}")
+            if operation == "upsert":
+                logger.info(f"SUCCESS: Upserts written to {full_s3_path}")
+            else:
+                logger.info(f"SUCCESS: Deletes applied to {full_s3_path}")
             return
 
         except Exception as e:
@@ -147,253 +212,11 @@ def _execute_delta_merge_with_retry(
     logger.error(f"CRITICAL: Failed to {operation} in S3 Delta Table. Error: {last_exception}")
     if last_dt is not None:
         logger.info(f"Delta schema: {[f.name for f in last_dt.schema().fields]}")
-
     logger.info(f"PK cols: {pk_cols}")
     logger.info(f"Merge predicate: {merge_predicate}")
-
     if last_exception is None:
         raise RuntimeError(f"Unknown failure during {operation} for {full_s3_path}")
     raise last_exception
-
-def _read_parquet_from_s3(
-    bucket: str,
-    key: str,
-) -> pd.DataFrame:
-    logger.info(
-        f"Reading Parquet file s3://{bucket}/{key}"
-    )
-
-    response = S3_CLIENT.get_object(
-        Bucket=bucket,
-        Key=key,
-    )
-
-    parquet_bytes = response["Body"].read()
-
-    df = pd.read_parquet(
-        BytesIO(parquet_bytes),
-        engine="pyarrow",
-    )
-
-    logger.info(
-        f"Read {len(df)} rows from "
-        f"s3://{bucket}/{key}"
-    )
-
-    return df
-
-
-def _as_dict(value: Any) -> Dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-
-    if hasattr(value, "as_py"):
-        converted = value.as_py()
-        if isinstance(converted, dict):
-            return converted
-
-    return {}
-
-def _get_nested_or_flattened(
-    row: Dict[str, Any],
-    object_name: str,
-    field_name: str,
-) -> Any:
-    nested = _as_dict(row.get(object_name))
-
-    if field_name in nested:
-        return nested[field_name]
-
-    candidate_names = (
-        f"{object_name}.{field_name}",
-        f"{object_name}_{field_name}",
-        f"{object_name}-{field_name}",
-    )
-
-    for candidate in candidate_names:
-        if candidate in row:
-            return row[candidate]
-
-    return None
-
-
-def _extract_business_data(
-    row: Dict[str, Any],
-) -> Dict[str, Any]:
-    nested_data = _as_dict(row.get("data"))
-
-    if nested_data:
-        if (
-            "_doc" in nested_data
-            and isinstance(nested_data["_doc"], dict)
-        ):
-            source = nested_data["_doc"]
-        else:
-            source = nested_data
-
-        return {
-            str(key).lower(): value
-            for key, value in source.items()
-        }
-
-    flattened_data: Dict[str, Any] = {}
-
-    for key, value in row.items():
-        key_str = str(key)
-
-        if key_str.startswith("data."):
-            flattened_data[
-                key_str[len("data."):].lower()
-            ] = value
-
-        elif key_str.startswith("data_"):
-            flattened_data[
-                key_str[len("data_"):].lower()
-            ] = value
-
-    if flattened_data:
-        return flattened_data
-
-    metadata_columns = {
-        "metadata",
-        "operation",
-        "schema-name",
-        "table-name",
-        "schema_name",
-        "table_name",
-        "metadata.operation",
-        "metadata.schema-name",
-        "metadata.table-name",
-        "metadata_operation",
-        "metadata_schema-name",
-        "metadata_table-name",
-        "metadata_schema_name",
-        "metadata_table_name",
-    }
-
-    business_data: Dict[str, Any] = {}
-
-    for key, value in row.items():
-        key_lower = str(key).lower()
-
-        if (
-            key_lower in metadata_columns
-            or key_lower.startswith("metadata.")
-            or key_lower.startswith("metadata_")
-        ):
-            continue
-
-        business_data[key_lower] = value
-
-    return business_data
-
-
-def _extract_operation(row: Dict[str, Any]) -> str:
-    operation = _get_nested_or_flattened(
-        row,
-        "metadata",
-        "operation",
-    )
-
-    if operation is None:
-        operation = row.get("operation")
-
-    if operation is None:
-        raise RuntimeError(
-            "Parquet row does not contain CDC operation"
-        )
-
-    return str(operation).lower()
-
-
-def _extract_schema_table_from_s3_key(key: str) -> Tuple[str, str]:
-    parts = [
-        part
-        for part in key.strip("/").split("/")
-        if part
-    ]
-
-    if len(parts) < 3:
-        raise RuntimeError(
-            "S3 key must contain at least "
-            "<schema>/<table>/<file.parquet>. "
-            f"Received: {key}"
-        )
-
-    return parts[-3].lower(), parts[-2].lower()
-
-
-def build_final_states_from_parquet(
-    parquet_df: pd.DataFrame, 
-    schema_name: str, 
-    table_name: str, 
-    primary_keys: Dict[str, List[str]],
-) -> Tuple[
-    List[Dict[str, Any]],
-    List[Dict[str, Any]],
-]:
-    grouped = defaultdict(list)
-    schema_name = schema_name.lower()
-    table_name = table_name.lower()
-    table_key = f"{schema_name}.{table_name}"
-
-    pk_cols = [col.lower() for col in primary_keys.get(table_key, [])]
-
-    if not pk_cols:
-        raise RuntimeError(f"No primary key defined for {table_key}")
-
-    for row_number, row in enumerate(parquet_df.to_dict(orient="records"), start=1):
-        try:
-            operation = _extract_operation(row)
-            business_data = _extract_business_data(row)
-
-            missing_pk = [
-                c for c in pk_cols
-                if (
-                    c not in business_data
-                    or pd.isna(business_data[c])
-                )
-            ]
-
-            if missing_pk:
-                raise RuntimeError(f"CDC row missing PK columns for {table_key}: {missing_pk}")
-
-            pk = tuple(business_data[col] for col in pk_cols)
-
-            if operation in ("insert", "update"):
-                normalized_op = "UPSERT"
-            elif operation == "delete":
-                normalized_op = "DELETE"
-            else:
-                raise RuntimeError(f"Unsupported operation '{operation}' for {table_key}")
-
-            grouped[pk].append(
-                {
-                    "pk": pk,
-                    "op": normalized_op,
-                    "data": business_data,
-                }
-            )
-
-        except Exception as exc:
-            raise RuntimeError(f"Error processing Parquet row {row_number}: {exc}") from exc
-
-    final_upserts: List[Dict[str, Any]] = []
-    final_deletes: List[Dict[str, Any]] = []
-
-    for pk, events in grouped.items():
-        final_state = reduce_events_for_key(events)
-
-        if final_state is None:
-            delete_row = {
-                col: pk[i]
-                for i, col in enumerate(pk_cols)
-            }
-            final_deletes.append(delete_row)
-        else:
-            final_upserts.append(final_state)
-
-    return final_upserts, final_deletes
 
 
 def _process_s3_record(
@@ -460,6 +283,7 @@ def _process_s3_record(
     )
 
     base_path = s3_bucket_base_path.rstrip("/")
+
     full_s3_path = (f"{base_path}/{schema_name}/{table_name}/")
 
     if not df_upsert.empty:
@@ -484,7 +308,7 @@ def _process_s3_record(
             max_attempts=3,
         )
 
-    total = (len(upsert_buffer)+ len(deletes_buffer) )
+    total = (len(upsert_buffer)+ len(deletes_buffer))
 
     logger.info(f"Successfully processed {total} CDC rows from s3://{bucket}/{key}for {schema_name}.{table_name}")
 
@@ -500,8 +324,6 @@ def lambda_handler(event, context):
 
     primary_keys = load_primary_keys(s3_config_bucket, PRIMARY_KEYS_FILE_NAME)
 
-    if not primary_keys:
-        raise RuntimeError("Primary keys configuration is empty")
 
     records = event.get("Records", [])
 
