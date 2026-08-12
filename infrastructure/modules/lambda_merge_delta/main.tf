@@ -26,13 +26,6 @@ data "aws_caller_identity" "this" {}
 data "aws_region" "this" {}
 data "aws_partition" "current" {}
 data "aws_iam_policy" "AWSLambdaBasicExecutionRole" { arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" }
-# data "aws_lambda_layer_version" "deltalake" { layer_name = "deltalake" }
-
-# data "archive_file" "this" {
-#   type        = "zip"
-#   source_dir  = "${path.module}/src"
-#   output_path = "${path.module}/lambda_function.zip"
-# }
 
 data "aws_iam_policy_document" "lambda_assume" {
   statement {
@@ -122,10 +115,10 @@ resource "aws_ecr_lifecycle_policy" "this" {
   )
 }
 
-# data "aws_ecr_image" "latest" {
-#   repository_name = aws_ecr_repository.this.name
-#   image_tag       = "latest"
-# }
+data "aws_ecr_image" "latest" {
+  repository_name = aws_ecr_repository.this.name
+  image_tag       = "latest"
+}
 
 resource "aws_lambda_function" "this" {
   publish          = true
@@ -134,26 +127,23 @@ resource "aws_lambda_function" "this" {
   memory_size      = var.lambda_memory_size
   timeout          = var.lambda_timeout
   role             = aws_iam_role.this.arn
-#   runtime          = var.lambda_runtime
-#   handler          = "lambda_function.lambda_handler"
-#   filename         = data.archive_file.this.output_path
-#   source_code_hash = data.archive_file.this.output_base64sha256
-  # layers           = [var.pandas_layer_arn, data.aws_lambda_layer_version.deltalake.arn]
-
   package_type = "Image"
   image_uri    = "${aws_ecr_repository.this.repository_url}:latest"
 
   environment {
     variables = {
-      S3_CONFIG_BUCKET                = var.config_s3_bucket_id
-      S3_BASE_PATH                    = "s3://${var.destination_s3_bucket_id}/"
+      S3_CONFIG_BUCKET                    = var.config_s3_bucket_id
+      S3_CONFIG_KEY                       = var.config_key
+      S3_SOURCE_BUCKET                    = var.source_s3_bucket_id
+      S3_TARGET_BUCKET                    = var.target_s3_bucket_id
+
       AWS_S3_LOCKING_PROVIDER         = "dynamodb"
       DYNAMO_LOCK_PARTITION_KEY_VALUE = "key"
       DYNAMO_LOCK_TABLE_NAME          = aws_dynamodb_table.delta_lock.name
-      GLUE_CATALOG_ID            = coalesce(var.glue_catalog_id, local.account_id)
-      GLUE_DATABASE_NAME         = join(",", var.glue_database_name)
-    #   TASK_ARN = var.dms_task_arn
-      AWS_S3_ALLOW_UNSAFE_RENAME = true
+      
+      # GLUE_CATALOG_ID            = coalesce(var.glue_catalog_id, local.account_id)
+      # GLUE_DATABASE_NAME         = join(",", var.glue_database_name)
+      #TASK_ARN = var.dms_task_arn
     }
   }
 
@@ -169,56 +159,45 @@ resource "aws_cloudwatch_log_group" "this" {
   skip_destroy      = false
 }
 
-# resource "aws_lambda_permission" "s3_invoke" {
-#   statement_id  = "AllowS3InvokeBootstrapLambda"
-#   action        = "lambda:InvokeFunction"
-#   function_name = aws_lambda_function.this.function_name
-#   principal     = "s3.amazonaws.com"
-#   source_arn    = var.destination_s3_bucket_arn
-# }
-
-# resource "aws_s3_bucket_notification" "load_parquet_created" {
-#   bucket = var.destination_s3_bucket_id
-
-#   dynamic "lambda_function" {
-#     for_each = {
-#       for v in var.s3_objects : v => {
-#         load_prefix = "${lower(element(split(".", v), 0))}/${lower(element(split(".", v), 1))}/2"
-#       }
-#     } 
-
-#     content {
-#       lambda_function_arn = aws_lambda_function.this.arn
-#       events              = ["s3:ObjectCreated:*"]
-
-#       filter_prefix = lambda_function.value.load_prefix
-#       filter_suffix = ".parquet"
-#     }
-#   }
-
-#   depends_on = [aws_lambda_permission.s3_invoke]
-# }
-
-resource "aws_dynamodb_table" "processed_files" {
-  name         = join(local.default_separator, [var.prefix, "cdc", "processed", "files"])
-  billing_mode = "PAY_PER_REQUEST"
-  
-  attribute { 
-    name = "key" 
-    type = "S" 
-  }
-  hash_key     = "key"
+resource "aws_lambda_permission" "s3_invoke" {
+  statement_id  = "AllowS3InvokeBootstrapLambda"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.this.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = "arn:aws:s3:::${var.source_s3_bucket_id}"
 }
 
-# resource "aws_dynamodb_table" "delta_log" {
-#   # Required delta-rs S3DynamoDbLogStore schema; do not reuse processed_files.
-#   name         = "${var.prefix}-delta-log"
+resource "aws_s3_bucket_notification" "load_parquet_created" {
+  bucket = var.source_s3_bucket_id
+
+  dynamic "lambda_function" {
+    for_each = {
+      for v in ["pasx.batchrecord", "wltuser.lsvcharge"] : v => {
+        load_prefix = "cdc/${lower(element(split(".", v), 0))}/${lower(element(split(".", v), 1))}/"
+      }
+    } 
+
+    content {
+      lambda_function_arn = aws_lambda_function.this.arn
+      events              = ["s3:ObjectCreated:*"]
+
+      filter_prefix = lambda_function.value.load_prefix
+      filter_suffix = ".parquet"
+    }
+  }
+
+  depends_on = [aws_lambda_permission.s3_invoke]
+}
+
+# resource "aws_dynamodb_table" "processed_files" {
+#   name         = join(local.default_separator, [var.prefix, "cdc", "processed", "files"])
 #   billing_mode = "PAY_PER_REQUEST"
-#   hash_key     = "tablePath"
-#   range_key    = "fileName"
-#   attribute { name = "tablePath" type = "S" }
-#   attribute { name = "fileName" type = "S" }
-#   ttl { attribute_name = "expireTime" enabled = true }
+  
+#   attribute { 
+#     name = "key" 
+#     type = "S" 
+#   }
+#   hash_key     = "key"
 # }
 
 resource "aws_dynamodb_table" "delta_lock" {

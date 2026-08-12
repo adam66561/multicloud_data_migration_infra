@@ -1,0 +1,9 @@
+{
+    "wltuser.lsvcharge": [
+        "materialnr",
+        "chargenr"
+    ],
+    "pasx.batchrecord": [
+        "entitykey"
+    ]
+}

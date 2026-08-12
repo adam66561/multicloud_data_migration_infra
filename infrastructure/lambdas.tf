@@ -23,11 +23,10 @@ module "lambda_merge_delta" {
   glue_database_name = ["pasx", "wltuser"]
   glue_catalog_id    = data.aws_caller_identity.current.account_id
 
-  destination_s3_bucket_id  = module.lambda_tests.s3_bucket_id
-  destination_s3_bucket_arn = module.lambda_tests.s3_bucket_arn
-
+  source_s3_bucket_id  = module.lambda_tests.s3_bucket_id
+  target_s3_bucket_id  = module.lambda_tests.s3_bucket_id
   config_s3_bucket_id  = module.lambda_tests.s3_bucket_id
-  config_s3_bucket_arn = module.lambda_tests.s3_bucket_arn
+  config_key           = aws_s3_object.lambda_tests_config.key
 }
 
 # module "lambda_merge_delta_wp" {

@@ -25,7 +25,11 @@ module "lambda_tests" {
       }
     }
   }
+}
 
-
-
+resource "aws_s3_object" "lambda_tests_config" {
+  bucket = module.lambda_tests.s3_bucket_id
+  key    = "primary_keys.json"
+  source = "${path.module}/primary_keys.json"
+  etag   = filemd5("./primary_keys.json")
 }
