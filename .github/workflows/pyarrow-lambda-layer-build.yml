@@ -23,7 +23,7 @@ jobs:
                 dnf install git zip unzip awscli -y                
             - uses: actions/checkout@v6
             - run: pip install --upgrade pip
-            - run: pip install --no-cache -r pyarrow -t asset/python/lib/python3.12/site-packages
+            - run: pip install --no-cache-dir pyarrow -t asset/python/lib/python3.12/site-packages
             - working-directory: asset
               run: zip -r ../pyarrow_layer.zip python -x "*.pyc" "*.pyo" "*__pycache__*" "*.dist-info*" "*.egg-info*" "tests" "docs" "examples" ".ruff_cache" ".mypy_cache" ".pytest_cache"
             - uses: aws-actions/configure-aws-credentials@v6
