@@ -177,7 +177,7 @@ def process_parquet(
     pk_cols = load_primary_keys(schema_name, table_name)
     table_key = f"{schema_name}.{table_name}"
 
-    s3_target_path = (f"{s3_target_bucket}/{schema_name}/{table_name}/")
+    s3_target_path = (f"s3://{s3_target_bucket}/{schema_name}/{table_name}/")
 
     df = read_parquet(s3_source_bucket, s3_source_key)
 
@@ -221,7 +221,7 @@ def lambda_handler(event, context):
             continue
 
         event_bucket = record["s3"]["bucket"]["name"]
-        event_key = record["s3"]["object"]["key"]
+        event_key = unquote_plus(record["s3"]["object"]["key"])
 
         if event_bucket != s3_source_bucket:
             logger.warning(

@@ -128,8 +128,8 @@ resource "aws_lambda_function" "this" {
   timeout          = var.lambda_timeout
   role             = aws_iam_role.this.arn
   package_type = "Image"
-  image_uri    = "${aws_ecr_repository.this.repository_url}:latest"
-
+  image_uri = "${aws_ecr_repository.this.repository_url}@${data.aws_ecr_image.latest.image_digest}"
+  
   environment {
     variables = {
       S3_CONFIG_BUCKET                    = var.config_s3_bucket_id
