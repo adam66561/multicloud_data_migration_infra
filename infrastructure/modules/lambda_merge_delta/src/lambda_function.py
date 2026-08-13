@@ -54,6 +54,30 @@ def read_parquet(bucket: str, key: str) -> pd.DataFrame:
     df["op"] = df["op"].astype(str).str.upper()
     return df
 
+def validate_primary_keys(
+    df: pd.DataFrame,
+    pk_cols: List[str],
+    s3_target_path: str,
+) -> None:
+    missing_columns = [
+        column
+        for column in pk_cols
+        if column not in df.columns
+    ]
+
+    if missing_columns:
+        raise RuntimeError(
+            f"DataFrame missing PK columns {missing_columns} "
+            f"for {s3_target_path}"
+        )
+
+    null_pk_rows = df[df[pk_cols].isna().any(axis=1)]
+
+    if not null_pk_rows.empty:
+        raise RuntimeError(
+            f"Found {len(null_pk_rows)} row(s) with null primary keys "
+            f"for {s3_target_path}"
+        )
 
 def merge_once(
         df: pd.DataFrame, 
@@ -112,9 +136,7 @@ def merge_with_retry(
     pk_cols: List[str],
     max_attempts: int = 3,
 ):
-    missing_pk = [c for c in pk_cols if c not in df.columns or pd.isna(df.iloc[0][c])]
-    if missing_pk:
-        raise RuntimeError(f"Dataframe missing PK columns: {missing_pk} for {s3_target_path}")
+    validate_primary_keys(df, pk_cols, s3_target_path)
 
     last_exception: Optional[Exception] = None
     last_dt: Optional[DeltaTable] = None
@@ -188,12 +210,10 @@ def build_final_state(
     if missing:
         raise RuntimeError(f"Missing columns in DataFrame: {sorted(missing)}")
 
-    df["_cdc_row_order"] = range(len(df))
-
     payload_cols = [
         col
         for col in df.columns
-        if col not in set(pk_cols + ["op", "_cdc_row_order"])
+        if col not in set(pk_cols + ["op"])
     ]
 
     final_rows = []
@@ -219,11 +239,7 @@ def build_final_state(
 
         final_rows.append(final_row)
 
-    return (
-        pd.DataFrame(final_rows)
-        .drop(columns=["_cdc_row_order"], errors="ignore")
-        .reset_index(drop=True)
-    )
+    return pd.DataFrame(final_rows).reset_index(drop=True)
 
 
 def process_parquet(
@@ -267,7 +283,6 @@ def process_parquet(
 
 
 def lambda_handler(event, context):
-    print(json.dumps(event, indent=2))
     try:
         s3_source_bucket = os.environ['S3_SOURCE_BUCKET']
         s3_target_bucket = os.environ['S3_TARGET_BUCKET']
