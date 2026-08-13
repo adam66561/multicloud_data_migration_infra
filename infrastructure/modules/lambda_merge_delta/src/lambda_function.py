@@ -30,28 +30,29 @@ def delta_table_exists(path: str) -> bool:
         return False
 
 def load_primary_keys(schema_name: str, table_name: str) -> List[str]:
-    try:
-        response = S3_CLIENT.get_object(
-            Bucket= os.environ["S3_CONFIG_BUCKET"],
-            Key=os.environ["S3_CONFIG_KEY"],
-        )
-        config = json.loads(response["Body"].read().decode("utf-8"))
-        table_key = f"{schema_name}.{table_name}".lower()
-        primary_keys = config.get(table_key)
-        if not primary_keys:
-            raise RuntimeError(f"No primary key configured for {table_key}")
-        return [str(column).lower() for column in primary_keys]
-    except Exception as e:
-        logger.error(f"Error loading config file: {e}")
-        return []
+    response = S3_CLIENT.get_object(
+        Bucket= os.environ["S3_CONFIG_BUCKET"],
+        Key=os.environ["S3_CONFIG_KEY"],
+    )
+    config = json.loads(response["Body"].read().decode("utf-8"))
+    table_key = f"{schema_name}.{table_name}".lower()
+    primary_keys = config.get(table_key)
+    if not primary_keys:
+        raise RuntimeError(f"No primary key configured for {table_key}")
+    return [str(column).lower() for column in primary_keys]
 
 
 def read_parquet(bucket: str, key: str) -> pd.DataFrame:
     response = S3_CLIENT.get_object(Bucket=bucket, Key=key,)
-    return pd.read_parquet(
+    df = pd.read_parquet(
         BytesIO(response["Body"].read()),
         engine="pyarrow",
     )
+    df.columns = [str(column).lower() for column in df.columns]
+    if "op" not in df.columns:
+        raise RuntimeError("DMS Parquet file does not contain an op column")
+    df["op"] = df["op"].astype(str).str.upper()
+    return df
 
 
 def merge_once(
@@ -65,7 +66,15 @@ def merge_once(
 
     if operation in ("I", "U"):
         source_table = pa.Table.from_pandas(df, preserve_index=False,)
-        col_map = {c: f"source.{c}" for c in df.columns}
+        update_map = {
+            column: f"COALESCE(source.`{column}`, target.`{column}`)"
+            for column in df.columns
+            if column not in pk_cols
+        }
+        insert_map = {
+            column: f"source.`{column}`"
+            for column in df.columns
+        }
         (
             dt.merge(
                 source=source_table,
@@ -73,8 +82,8 @@ def merge_once(
                 source_alias="source",
                 target_alias="target",
             )
-            .when_matched_update(updates=col_map)
-            .when_not_matched_insert(updates=col_map)
+            .when_matched_update(updates=update_map)
+            .when_not_matched_insert(updates=insert_map)
             .execute()
         )
     elif operation in ("D"):
@@ -97,15 +106,12 @@ def merge_once(
 
 
 def merge_with_retry(
-    row_data: Dict[str, Any],
+    df: pd.DataFrame,
     operation: str,
     s3_target_path: str,
     pk_cols: List[str],
     max_attempts: int = 3,
 ):
-    df = pd.DataFrame([row_data])
-    df.columns = [str(c).lower() for c in df.columns]
-
     missing_pk = [c for c in pk_cols if c not in df.columns or pd.isna(df.iloc[0][c])]
     if missing_pk:
         raise RuntimeError(f"Dataframe missing PK columns: {missing_pk} for {s3_target_path}")
@@ -168,6 +174,58 @@ def extract_schema_table_from_s3_key(key: str) -> Tuple[str, str]:
     return parts[1].lower(), parts[2].lower()
 
 
+# assuming that order in parquet file is preserved as real event happened
+# there is no good candidate for sequence column (optime has the same value for rows sometimes)
+def build_final_state(
+    df: pd.DataFrame,
+    pk_cols: List[str],
+) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
+    required_columns = set(pk_cols + ["op"])
+    missing = required_columns - set(df.columns)
+    if missing:
+        raise RuntimeError(f"Missing columns in DataFrame: {sorted(missing)}")
+
+    df["_cdc_row_order"] = range(len(df))
+
+    payload_cols = [
+        col
+        for col in df.columns
+        if col not in set(pk_cols + ["op", "_cdc_row_order"])
+    ]
+
+    final_rows = []
+
+    # sort=False preserves first-seen PK group order.
+    # Each group itself retains its original DataFrame row order.
+    for _, group in df.groupby(pk_cols, sort=False, dropna=False):
+        final_row = group.iloc[-1].copy()
+
+        # The last event is a delete: delete this PK from Delta.
+        if final_row["op"] == "D":
+            final_rows.append(final_row)
+            continue
+
+        # For I/U, retain the latest non-null changed value per column.
+        for col in payload_cols:
+            changed_values = group[col].dropna()
+
+            if not changed_values.empty:
+                final_row[col] = changed_values.iloc[-1]
+            else:
+                final_row[col] = None
+
+        final_rows.append(final_row)
+
+    return (
+        pd.DataFrame(final_rows)
+        .drop(columns=["_cdc_row_order"], errors="ignore")
+        .reset_index(drop=True)
+    )
+
+
 def process_parquet(
     s3_source_bucket: str,
     s3_source_key: str,
@@ -186,15 +244,22 @@ def process_parquet(
         f"s3://{s3_source_bucket}/{s3_source_key} as {table_key}"
     )
 
-    for row_number, row in enumerate(df.to_dict(orient="records"), start=1):
-        operation = str(row["op"]).upper()
-        row_data = {key: value for key, value in row.items()}
+    final_df = build_final_state(df, pk_cols)
+    upserts_df = final_df[final_df["op"].isin(["I", "U"])].copy()
+    deletes_df = final_df[final_df["op"] == "D"].copy()
 
-        logger.info(f"Row {row_number}/{len(df)}: {operation}")
-
+    if not upserts_df.empty:
         merge_with_retry(
-            row_data=row_data,
-            operation=operation,
+            df=upserts_df,
+            operation="I",
+            s3_target_path=s3_target_path,
+            pk_cols=pk_cols,
+            max_attempts=3,
+        )
+    if not deletes_df.empty:
+        merge_with_retry(
+            df=deletes_df,
+            operation="D",
             s3_target_path=s3_target_path,
             pk_cols=pk_cols,
             max_attempts=3,

@@ -50,12 +50,12 @@ data "aws_iam_policy_document" "this" {
       "s3:*Object",
       "s3:ListBucket",
       "s3:GetBucketLocation",
-      "dynamodb:GetItem",
-      "dynamodb:PutItem",
-      "dynamodb:UpdateItem",
-      "dynamodb:DeleteItem",
-      "dynamodb:DescribeTable",
-      "dynamodb:Query",
+      # "dynamodb:GetItem",
+      # "dynamodb:PutItem",
+      # "dynamodb:UpdateItem",
+      # "dynamodb:DeleteItem",
+      # "dynamodb:DescribeTable",
+      # "dynamodb:Query",
       "glue:GetDatabase",
       "glue:GetTables",
       "dms:DescribeReplicationTasks",
@@ -67,7 +67,7 @@ data "aws_iam_policy_document" "this" {
       "arn:${local.partition}:glue:${local.region}:${local.account_id}:table/*/*",
       "arn:${local.partition}:s3:::*",
       "arn:${local.partition}:s3:::*/*",
-      "${aws_dynamodb_table.delta_lock.arn}"
+      # "${aws_dynamodb_table.delta_lock.arn}"
     ]
   }
 }
@@ -129,7 +129,7 @@ resource "aws_lambda_function" "this" {
   role             = aws_iam_role.this.arn
   package_type = "Image"
   image_uri = "${aws_ecr_repository.this.repository_url}@${data.aws_ecr_image.latest.image_digest}"
-  
+
   environment {
     variables = {
       S3_CONFIG_BUCKET                    = var.config_s3_bucket_id
@@ -137,10 +137,6 @@ resource "aws_lambda_function" "this" {
       S3_SOURCE_BUCKET                    = var.source_s3_bucket_id
       S3_TARGET_BUCKET                    = var.target_s3_bucket_id
 
-      AWS_S3_LOCKING_PROVIDER         = "dynamodb"
-      DYNAMO_LOCK_PARTITION_KEY_VALUE = "key"
-      DYNAMO_LOCK_TABLE_NAME          = aws_dynamodb_table.delta_lock.name
-      
       # GLUE_CATALOG_ID            = coalesce(var.glue_catalog_id, local.account_id)
       # GLUE_DATABASE_NAME         = join(",", var.glue_database_name)
       # TASK_ARN = var.dms_task_arn
@@ -200,16 +196,16 @@ resource "aws_s3_bucket_notification" "load_parquet_created" {
 #   hash_key     = "key"
 # }
 
-resource "aws_dynamodb_table" "delta_lock" {
-  name         = join(local.default_separator, [var.prefix, "delta", "lock"])
-  billing_mode = "PAY_PER_REQUEST"
-  attribute {
-    name = "key"
-    type = "S"
-  }
-  hash_key = "key"
+# resource "aws_dynamodb_table" "delta_lock" {
+#   name         = join(local.default_separator, [var.prefix, "delta", "lock"])
+#   billing_mode = "PAY_PER_REQUEST"
+#   attribute {
+#     name = "key"
+#     type = "S"
+#   }
+#   hash_key = "key"
 
-  tags = {
-    Name = join(local.default_separator, ["bln", "prod", "lock", "deltatable"])
-  }
-}
+#   tags = {
+#     Name = join(local.default_separator, ["bln", "prod", "lock", "deltatable"])
+#   }
+# }
