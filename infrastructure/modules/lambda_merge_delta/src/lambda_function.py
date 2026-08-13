@@ -221,7 +221,7 @@ def lambda_handler(event, context):
             continue
 
         event_bucket = record["s3"]["bucket"]["name"]
-        event_key = unquote_plus(record["s3"]["object"]["key"])
+        event_key = record["s3"]["object"]["key"]
 
         if event_bucket != s3_source_bucket:
             logger.warning(
