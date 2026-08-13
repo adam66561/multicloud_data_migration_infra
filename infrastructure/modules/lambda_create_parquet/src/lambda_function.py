@@ -1,10 +1,7 @@
 import json
 import logging
 import os
-import random
 import uuid
-
-from datetime import datetime, timezone
 from pathlib import Path
 
 import boto3
@@ -18,35 +15,6 @@ logger.setLevel(logging.INFO)
 s3 = boto3.client("s3")
 
 DEFAULT_ROWS_PER_FILE = 100
-DEFAULT_FILES = 1
-
-def generate_mock_data(
-    rows_count: int,
-    subcatalog: str,
-) -> pa.Table:
-
-    now = datetime.now(timezone.utc)
-
-    data = {
-        "id": [],
-        "name": [],
-        "amount": [],
-        "active": [],
-        "source_catalog": [],
-        "created_at": [],
-    }
-
-    for _ in range(rows_count):
-        record_id = random.randint(1, 10_000_000)
-
-        data["id"].append(record_id)
-        data["name"].append(f"mock-{record_id}")
-        data["amount"].append(round(random.uniform(1, 10000), 2))
-        data["active"].append(random.choice([True, False]))
-        data["source_catalog"].append(subcatalog)
-        data["created_at"].append(now)
-
-    return pa.table(data)
 
 
 def write_parquet_to_s3(
@@ -54,10 +22,8 @@ def write_parquet_to_s3(
     bucket: str,
     prefix: str,
 ) -> str:
-
     file_id = uuid.uuid4().hex
-
-    filename = f"mock-{file_id}.parquet"
+    filename = f"data-{file_id}.parquet"
     local_path = Path("/tmp") / filename
 
     pq.write_table(
@@ -66,50 +32,51 @@ def write_parquet_to_s3(
         compression="snappy",
     )
 
-    s3_key = f"{prefix.rstrip('/')}/{filename}"
+    s3_key = f"{prefix.strip('/')}/{filename}"
 
     logger.info(
-        "Uploading parquet file: s3://%s/%s",
+        "Uploading Parquet file: s3://%s/%s",
         bucket,
         s3_key,
     )
 
-    s3.upload_file(
-        str(local_path),
-        bucket,
-        s3_key,
-    )
-
-    local_path.unlink(missing_ok=True)
+    try:
+        s3.upload_file(
+            str(local_path),
+            bucket,
+            s3_key,
+        )
+    finally:
+        local_path.unlink(missing_ok=True)
 
     return f"s3://{bucket}/{s3_key}"
+
+
+def split_records(
+    records: list[dict],
+    rows_per_file: int,
+) -> list[list[dict]]:
+    return [
+        records[index:index + rows_per_file]
+        for index in range(0, len(records), rows_per_file)
+    ]
 
 
 def process_subcatalog(
     bucket: str,
     config: dict,
 ) -> list[str]:
-
-    path = config["path"]
-
+    path = config["path"].strip("/")
+    records = config["records"]
     rows_per_file = config.get(
         "rows_per_file",
         DEFAULT_ROWS_PER_FILE,
     )
 
-    number_of_files = config.get(
-        "files",
-        DEFAULT_FILES,
-    )
-
     generated_files = []
 
-    for _ in range(number_of_files):
-
-        table = generate_mock_data(
-            rows_count=rows_per_file,
-            subcatalog=path,
-        )
+    for record_batch in split_records(records, rows_per_file):
+        table = pa.Table.from_pylist(record_batch)
 
         s3_uri = write_parquet_to_s3(
             table=table,
@@ -123,6 +90,8 @@ def process_subcatalog(
 
 
 def validate_event(event: dict) -> None:
+    if not isinstance(event, dict):
+        raise ValueError("Event must be an object.")
 
     if "subcatalogs" not in event:
         raise ValueError("Event must contain 'subcatalogs'.")
@@ -133,38 +102,80 @@ def validate_event(event: dict) -> None:
     if not event["subcatalogs"]:
         raise ValueError("'subcatalogs' cannot be empty.")
 
-    for subcatalog in event["subcatalogs"]:
-
+    for index, subcatalog in enumerate(event["subcatalogs"]):
         if not isinstance(subcatalog, dict):
             raise ValueError(
-                "Each subcatalog must be an object."
+                f"Subcatalog at index {index} must be an object."
             )
 
-        if "path" not in subcatalog:
+        if not subcatalog.get("path"):
             raise ValueError(
-                "Each subcatalog must contain 'path'."
+                f"Subcatalog at index {index} must contain a non-empty 'path'."
+            )
+
+        if "records" not in subcatalog:
+            raise ValueError(
+                f"Subcatalog '{subcatalog['path']}' must contain 'records'."
+            )
+
+        if not isinstance(subcatalog["records"], list):
+            raise ValueError(
+                f"'records' in subcatalog '{subcatalog['path']}' must be a list."
+            )
+
+        if not subcatalog["records"]:
+            raise ValueError(
+                f"'records' in subcatalog '{subcatalog['path']}' cannot be empty."
+            )
+
+        if not all(
+            isinstance(record, dict)
+            for record in subcatalog["records"]
+        ):
+            raise ValueError(
+                f"Every item in 'records' for '{subcatalog['path']}' "
+                "must be an object."
+            )
+
+        rows_per_file = subcatalog.get(
+            "rows_per_file",
+            DEFAULT_ROWS_PER_FILE,
+        )
+
+        if (
+            not isinstance(rows_per_file, int)
+            or isinstance(rows_per_file, bool)
+            or rows_per_file <= 0
+        ):
+            raise ValueError(
+                f"'rows_per_file' for '{subcatalog['path']}' "
+                "must be a positive integer."
             )
 
 
 def lambda_handler(event, context):
     logger.info(
-        "Received event: %s",
-        json.dumps(event),
+        "Received event with %s subcatalog(s).",
+        len(event.get("subcatalogs", [])),
     )
 
     validate_event(event)
 
-    bucket = os.environ.get("S3_BUCKET")
+    bucket = event.get("bucket") or os.environ.get("S3_BUCKET")
+
+    if not bucket:
+        raise ValueError(
+            "S3 bucket is required. Set event['bucket'] "
+            "or the S3_BUCKET environment variable."
+        )
 
     generated_files = []
 
     for subcatalog_config in event["subcatalogs"]:
-
         files = process_subcatalog(
             bucket=bucket,
             config=subcatalog_config,
         )
-
         generated_files.extend(files)
 
     response = {
@@ -174,7 +185,7 @@ def lambda_handler(event, context):
     }
 
     logger.info(
-        "Generation finished: %s",
+        "Parquet generation finished: %s",
         json.dumps(response),
     )
 

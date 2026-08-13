@@ -31,23 +31,23 @@ def delta_table_exists(path: str) -> bool:
 
 def load_primary_keys(schema_name: str, table_name: str) -> List[str]:
     try:
-        response = s3.get_object(
-            Bucket= os.environ[S3_CONFIG_BUCKET],
-            Key=os.environ[S3_CONFIG_KEY],
+        response = S3_CLIENT.get_object(
+            Bucket= os.environ["S3_CONFIG_BUCKET"],
+            Key=os.environ["S3_CONFIG_KEY"],
         )
         config = json.loads(response["Body"].read().decode("utf-8"))
         table_key = f"{schema_name}.{table_name}".lower()
         primary_keys = config.get(table_key)
         if not primary_keys:
             raise RuntimeError(f"No primary key configured for {table_key}")
-        return [column.lower() for column in primary_keys]
+        return [str(column).lower() for column in primary_keys]
     except Exception as e:
         logger.error(f"Error loading config file: {e}")
         return []
 
 
 def read_parquet(bucket: str, key: str) -> pd.DataFrame:
-    response = s3.get_object(Bucket=bucket, Key=key,)
+    response = S3_CLIENT.get_object(Bucket=bucket, Key=key,)
     return pd.read_parquet(
         BytesIO(response["Body"].read()),
         engine="pyarrow",
@@ -64,14 +64,8 @@ def merge_once(
     merge_predicate = " AND ".join([f"target.{c} = source.{c}" for c in pk_cols])
 
     if operation in ("I", "U"):
-        source_table = pa.Table.from_pandas(
-            df,
-            preserve_index=False,
-        )
-        col_map = {
-            c: f"source.{c}"
-            for c in df.columns
-        }
+        source_table = pa.Table.from_pandas(df, preserve_index=False,)
+        col_map = {c: f"source.{c}" for c in df.columns}
         (
             dt.merge(
                 source=source_table,
@@ -84,10 +78,7 @@ def merge_once(
             .execute()
         )
     elif operation in ("D"):
-        source_table = pa.Table.from_pandas(
-            df[pk_cols],
-            preserve_index=False,
-        )
+        source_table = pa.Table.from_pandas(df[pk_cols], preserve_index=False,)
         (
             dt.merge(
                 source=source_table,
@@ -196,7 +187,7 @@ def process_parquet(
     )
 
     for row_number, row in enumerate(df.to_dict(orient="records"), start=1):
-        operation = str(row["op"].lower())
+        operation = str(row["op"]).upper()
         row_data = {key: value for key, value in row.items()}
 
         logger.info(f"Row {row_number}/{len(df)}: {operation}")

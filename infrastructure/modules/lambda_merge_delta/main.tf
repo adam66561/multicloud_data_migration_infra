@@ -143,7 +143,7 @@ resource "aws_lambda_function" "this" {
       
       # GLUE_CATALOG_ID            = coalesce(var.glue_catalog_id, local.account_id)
       # GLUE_DATABASE_NAME         = join(",", var.glue_database_name)
-      #TASK_ARN = var.dms_task_arn
+      # TASK_ARN = var.dms_task_arn
     }
   }
 

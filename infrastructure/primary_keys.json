@@ -7,3 +7,56 @@
         "entitykey"
     ]
 }
+
+
+{
+  "subcatalogs": [
+    {
+      "path": "pasx/batchrecord",
+      "rows_per_file": 1,
+      "records": [
+        {
+          "op": "I",
+          "entitykey": 1,
+          "id": 1,
+          "name": "Alice",
+          "amount": 125,
+          "active": true,
+          "created_at": "2026-08-13T08:00:00Z"
+        },
+        {
+          "op": "I",
+          "entitykey": 2,
+          "id": 2,
+          "name": "Bob",
+          "amount": 55,
+          "active": false,
+          "created_at": "2026-08-13T08:05:00Z"
+        },
+        {
+          "op": "I",
+          "entitykey": 3,
+          "id": 3,
+          "name": "Charlie",
+          "amount": 88,
+          "active": true,
+          "created_at": "2026-08-13T08:10:00Z"
+        }
+      ]
+    },
+    {
+      "path": "wltuser/lsvcharge",
+      "records": [
+        {
+          "materialnr": 1,
+          "chargenr": 1,
+          "op": "I",
+          "order_id": "ORD-001",
+          "customer_id": 1,
+          "status": "created",
+          "total_amount": 125
+        }
+      ]
+    }
+  ]
+}
