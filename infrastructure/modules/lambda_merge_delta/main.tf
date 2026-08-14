@@ -61,7 +61,10 @@ data "aws_iam_policy_document" "this" {
       "glue:GetDatabase",
       "glue:GetTables",
       "dms:DescribeReplicationTasks",
-      "dms:DescribeTableStatistics"
+      "dms:DescribeTableStatistics",
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+      "sqs:GetQueueAttributes"
     ]
     resources = [
       "arn:${local.partition}:glue:${local.region}:${local.account_id}:catalog",
@@ -69,6 +72,7 @@ data "aws_iam_policy_document" "this" {
       "arn:${local.partition}:glue:${local.region}:${local.account_id}:table/*/*",
       "arn:${local.partition}:s3:::*",
       "arn:${local.partition}:s3:::*/*",
+      "arn:${local.partition}:sqs:${local.region}:${local.account_id}:*",
       # "${aws_dynamodb_table.delta_lock.arn}"
     ]
   }
@@ -216,7 +220,6 @@ resource "aws_sqs_queue" "dlq" {
 
 resource "aws_cloudwatch_event_rule" "cdc_parquet_created" {
   for_each = var.type_of_event == "fifo" ? local.cdc_tables : toset([])
-
   name = join(local.default_separator, [var.prefix, replace(each.key, ".", "-")])
 
   event_pattern = jsonencode({
@@ -224,9 +227,70 @@ resource "aws_cloudwatch_event_rule" "cdc_parquet_created" {
     detail-type = [ "Object Created" ]
     detail = {
       bucket = { name = [var.source_s3_bucket_id] }
-      object = { key = [{prefix = "cdc/${lower(element(split(".", each.value), 0))}/${lower(element(split(".", each.value), 1))}/"}] }
+      object = { key = [{ wildcard = "cdc/${lower(element(split(".", each.value), 0))}/${lower(element(split(".", each.value), 1))}/*.parquet" }] }
     }
   })
+}
+
+resource "aws_cloudwatch_event_target" "sqs" {
+  for_each = var.type_of_event == "fifo" ? local.cdc_tables : toset([])
+
+  rule = aws_cloudwatch_event_rule.cdc_parquet_created[each.key].name
+  arn  = aws_sqs_queue.this[0].arn
+
+  sqs_target {
+    message_group_id = each.key
+  }
+}
+
+data "aws_iam_policy_document" "sqs_eventbridge" {
+  statement {
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+
+    actions = [
+      "sqs:SendMessage"
+    ]
+
+    resources = [
+      aws_sqs_queue.this[0].arn
+    ]
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+
+      values = [
+        for rule in aws_cloudwatch_event_rule.cdc_parquet_created :
+        rule.arn
+      ]
+    }
+  }
+}
+
+resource "aws_sqs_queue_policy" "eventbridge" {
+  count = var.type_of_event == "fifo" ? 1 : 0
+
+  queue_url = aws_sqs_queue.this[0].id
+  policy    = data.aws_iam_policy_document.sqs_eventbridge.json
+}
+
+resource "aws_lambda_event_source_mapping" "sqs" {
+  count = var.type_of_event == "fifo" ? 1 : 0
+
+  event_source_arn = aws_sqs_queue.this[0].arn
+  function_name    = aws_lambda_function.this.arn
+
+  batch_size = 1
+  enabled    = true
+
+  depends_on = [
+    aws_iam_role_policy_attachment.this
+  ]
 }
 
 resource "aws_dynamodb_table" "processed_files" {

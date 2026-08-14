@@ -1,11 +1,12 @@
 import boto3
+from botocore.exceptions import ClientError
 import json
 import logging
 import os
 import random
 import time
 
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 from io import BytesIO
 
 import pandas as pd
@@ -40,7 +41,18 @@ def load_primary_keys(schema_name: str, table_name: str) -> List[str]:
 
 
 def read_parquet(bucket: str, key: str, pk_cols: List[str]) -> pd.DataFrame:
-    response = S3_CLIENT.get_object(Bucket=bucket, Key=key,)
+    try:
+        response = S3_CLIENT.get_object(Bucket=bucket, Key=key,)
+    except ClientError as e:
+        if e.response["Error"]["Code"] in (
+            "NoSuchKey",
+            "404",
+        ):
+            logger.warning(
+                f"CDC file no longer exists, skipping: "
+                f"s3://{bucket}/{key}"
+            )
+            return None
 
     df = pd.read_parquet(
         BytesIO(response["Body"].read()),
@@ -245,6 +257,9 @@ def process_parquet(
         )
 
     df = read_parquet(s3_source_bucket, s3_source_key, pk_cols)
+
+    if df is None:
+        return
 
     logger.info(
         f"Processing {len(df)} rows from "
