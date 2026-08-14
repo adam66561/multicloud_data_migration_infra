@@ -123,17 +123,33 @@ def merge_once(
     ]
     )
 
+    source_table = pa.Table.from_pandas(df, preserve_index=False,)
+
+    target_columns = {
+        field.name
+        for field in dt.schema().fields
+    }
+
+    new_columns = [
+        column
+        for column in df.columns
+        if column not in target_columns
+    ]
+
     logger.info(
         f"Starting merge for {s3_target_path}; "
         f"rows={len(df)}; "
         f"pk_cols={pk_cols}; "
+        f"new_columns={new_columns}; "
         f"predicate={merge_predicate}"
     )
 
-    source_table = pa.Table.from_pandas(df, preserve_index=False,)
-
     update_map = {
-        column: f"COALESCE(source.`{column}`, target.`{column}`)"
+        column: (
+            f"COALESCE(source.`{column}`, target.`{column}`)"
+            if column in target_columns
+            else f"source.`{column}`"
+        )
         for column in df.columns
         if column not in pk_cols
     }
@@ -149,6 +165,7 @@ def merge_once(
             predicate=merge_predicate,
             source_alias="source",
             target_alias="target",
+            merge_schema=True,
         )
         .when_matched_delete(predicate=(
             "source.op = 'D' "
