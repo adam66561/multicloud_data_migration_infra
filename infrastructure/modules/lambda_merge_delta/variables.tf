@@ -24,3 +24,18 @@ variable "logs_retention_in_days" {
   type    = number
   default = 30
 }
+
+variable "create_dynamodb" {
+  type    = bool
+  default = false
+}
+
+variable "type_of_event" {
+  type    = string
+  default = "fifo"
+
+  validation {
+    condition     = contains(["s3", "fifo"], var.type_of_event)
+    error_message = "type_of_event must be either 's3' or 'fifo'"
+  }
+}

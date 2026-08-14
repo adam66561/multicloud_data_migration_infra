@@ -20,6 +20,8 @@ locals {
   account_id        = data.aws_caller_identity.this.account_id
   partition         = data.aws_partition.current.partition
   region            = data.aws_region.this.region
+
+  cdc_tables = toset(["pasx.batchrecord", "wltuser.lsvcharge"])
 }
 
 data "aws_caller_identity" "this" {}
@@ -136,6 +138,7 @@ resource "aws_lambda_function" "this" {
       S3_CONFIG_KEY                       = var.config_key
       S3_SOURCE_BUCKET                    = var.source_s3_bucket_id
       S3_TARGET_BUCKET                    = var.target_s3_bucket_id
+      EVENT_TYPE                   = var.type_of_event
 
       # GLUE_CATALOG_ID            = coalesce(var.glue_catalog_id, local.account_id)
       # GLUE_DATABASE_NAME         = join(",", var.glue_database_name)
@@ -166,12 +169,14 @@ resource "aws_lambda_permission" "s3_invoke" {
 resource "aws_s3_bucket_notification" "load_parquet_created" {
   bucket = var.source_s3_bucket_id
 
+  eventbridge = var.type_of_event == "fifo"
+
   dynamic "lambda_function" {
-    for_each = {
-      for v in ["pasx.batchrecord", "wltuser.lsvcharge"] : v => {
+    for_each = var.type_of_event == "s3" ? {
+      for v in local.cdc_tables : v => {
         load_prefix = "cdc/${lower(element(split(".", v), 0))}/${lower(element(split(".", v), 1))}/"
       }
-    } 
+    } : {}
 
     content {
       lambda_function_arn = aws_lambda_function.this.arn
@@ -185,27 +190,54 @@ resource "aws_s3_bucket_notification" "load_parquet_created" {
   depends_on = [aws_lambda_permission.s3_invoke]
 }
 
-# resource "aws_dynamodb_table" "processed_files" {
-#   name         = join(local.default_separator, [var.prefix, "cdc", "processed", "files"])
-#   billing_mode = "PAY_PER_REQUEST"
+resource "aws_sqs_queue" "this" {
+  count = var.type_of_event == "fifo" ? 1 : 0
+
+  name       = "${join(local.default_separator, [var.prefix, "fifo"])}.fifo"
+  fifo_queue = true
+
+  visibility_timeout_seconds = 300
+  message_retention_seconds  = 86400
+  receive_wait_time_seconds  = 20
+
+  content_based_deduplication = true
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.dlq[count.index].arn
+    maxReceiveCount     = 10
+  })
+}
+
+resource "aws_sqs_queue" "dlq" {
+  count = var.type_of_event == "fifo" ? 1 : 0
+  name       = "${join(local.default_separator, [var.prefix, "dlq"])}.fifo"
+  fifo_queue = true
+}
+
+resource "aws_cloudwatch_event_rule" "cdc_parquet_created" {
+  for_each = var.type_of_event == "fifo" ? local.cdc_tables : toset([])
+
+  name = join(local.default_separator, [var.prefix, replace(each.key, ".", "-")])
+
+  event_pattern = jsonencode({
+    source = [ "aws.s3" ]
+    detail-type = [ "Object Created" ]
+    detail = {
+      bucket = { name = [var.source_s3_bucket_id] }
+      object = { key = [{prefix = "cdc/${lower(element(split(".", each.value), 0))}/${lower(element(split(".", each.value), 1))}/"}] }
+    }
+  })
+}
+
+resource "aws_dynamodb_table" "processed_files" {
+  count = var.create_dynamodb ? 1 : 0
   
-#   attribute { 
-#     name = "key" 
-#     type = "S" 
-#   }
-#   hash_key     = "key"
-# }
-
-# resource "aws_dynamodb_table" "delta_lock" {
-#   name         = join(local.default_separator, [var.prefix, "delta", "lock"])
-#   billing_mode = "PAY_PER_REQUEST"
-#   attribute {
-#     name = "key"
-#     type = "S"
-#   }
-#   hash_key = "key"
-
-#   tags = {
-#     Name = join(local.default_separator, ["bln", "prod", "lock", "deltatable"])
-#   }
-# }
+  name         = join(local.default_separator, [var.prefix, "cdc", "processed", "files"])
+  billing_mode = "PAY_PER_REQUEST"
+  
+  attribute { 
+    name = "key" 
+    type = "S" 
+  }
+  hash_key     = "key"
+}

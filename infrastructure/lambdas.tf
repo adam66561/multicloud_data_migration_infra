@@ -27,6 +27,9 @@ module "lambda_merge_delta" {
   target_s3_bucket_id = module.lambda_tests.s3_bucket_id
   config_s3_bucket_id = module.lambda_tests.s3_bucket_id
   config_key          = aws_s3_object.lambda_tests_config.key
+
+  create_dynamodb = false
+  type_of_event   = "fifo"
 }
 
 # module "lambda_merge_delta_wp" {
