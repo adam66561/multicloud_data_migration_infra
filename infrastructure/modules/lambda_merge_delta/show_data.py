@@ -1,36 +1,15 @@
-# from deltalake import DeltaTable
-# import pandas as pd
-
-# table_path = "s3://dev-multicloud-lambda-tests/wltuser/lsvcharge"
-
-# df = DeltaTable(table_path).to_pandas()
-
-# pd.set_option("display.max_columns", None)
-# pd.set_option("display.width", None)
-# pd.set_option("display.max_colwidth", None)
-
-# print(df)
-
-
-
-from pathlib import Path
 from deltalake import DeltaTable
+import pandas as pd
 
-
-table_path = "s3://dev-multicloud-lambda-tests/cdc_delta_audit/"
-output_path = Path("cdc_delta_audit.csv")
+table_path = "s3://dev-multicloud-lambda-tests/pasx/batchrecord"
 
 df = DeltaTable(table_path).to_pandas()
 
-df.to_csv(
-    output_path,
-    index=False,
-    encoding="utf-8",
-)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+pd.set_option("display.max_colwidth", None)
 
-print(f"Wrote {len(df)} rows and {len(df.columns)} columns to: {output_path.resolve()}")
-
-
+print(df)
 
 
 # import io

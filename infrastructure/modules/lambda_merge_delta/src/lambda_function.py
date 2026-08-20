@@ -19,7 +19,6 @@ logger.setLevel(logging.INFO)
 
 BOTO3_SESSION = boto3.Session()
 S3_CLIENT = BOTO3_SESSION.client("s3")
-dynamodb = boto3.resource("dynamodb")
 
 def delta_table_exists(path: str) -> bool:
     try:
@@ -293,6 +292,8 @@ def append_merge_audit(
     metrics: dict,
     attempt: int,
 ) -> None:
+    dynamodb = boto3.resource("dynamodb")
+    audit_table = dynamodb.Table(audit_table)
     now = datetime.now(timezone.utc)
     audit_item = {
         "file_id": f"{source_bucket}/{source_key}",
