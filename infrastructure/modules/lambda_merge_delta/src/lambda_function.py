@@ -5,7 +5,7 @@ import logging
 import os
 import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from typing import List, Tuple
 from io import BytesIO
@@ -299,6 +299,7 @@ def append_merge_audit(
         "file_id": f"{source_bucket}/{source_key}",
         "processed_at": now.isoformat(),
         "processed_date": now.date().isoformat(),
+        "expires_at": int((now + timedelta(days=90)).timestamp()),
         "status": "SUCCEEDED",
         "source_bucket": source_bucket,
         "source_key": source_key,

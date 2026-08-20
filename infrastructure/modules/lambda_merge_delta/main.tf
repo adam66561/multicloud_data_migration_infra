@@ -297,10 +297,15 @@ resource "aws_dynamodb_table" "merge_audit" {
   count = var.audit_logs ? 1 : 0
   name         = join(local.default_separator, [var.prefix, "merge", "audit"])
   billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "file_id"
   
   attribute { 
     name = "file_id" 
     type = "S" 
   }
-  hash_key     = "file_id"
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
 }
