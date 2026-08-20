@@ -19,6 +19,7 @@ logger.setLevel(logging.INFO)
 
 BOTO3_SESSION = boto3.Session()
 S3_CLIENT = BOTO3_SESSION.client("s3")
+dynamodb = boto3.resource("dynamodb")
 
 def delta_table_exists(path: str) -> bool:
     try:
@@ -281,7 +282,7 @@ def build_final_state(
 
 
 def append_merge_audit(
-    audit_path: str,
+    audit_table: str,
     source_bucket: str,
     source_key: str,
     schema_name: str,
@@ -291,88 +292,50 @@ def append_merge_audit(
     final_state_rows: int,
     metrics: dict,
     attempt: int,
-    max_attempts: int = 3,
 ) -> None:
-    for audit_attempt in range(1, max_attempts + 1):
-        try:
-            audit_row = {
-                "processed_at": datetime.now(timezone.utc),
-                "processed_date": datetime.now(timezone.utc).date().isoformat(),
-                "status": "SUCCEEDED",
-                "source_bucket": source_bucket,
-                "source_key": source_key,
-                "schema_name": schema_name,
-                "table_name": table_name,
-                "target_path": target_path,
-                "input_rows": input_rows,
-                "final_state_rows": final_state_rows,
-                "merge_attempt": attempt,
-                "num_source_rows": metrics.get("num_source_rows", 0),
-                "num_target_rows_inserted": metrics.get(
-                    "num_target_rows_inserted", 0
-                ),
-                "num_target_rows_updated": metrics.get(
-                    "num_target_rows_updated", 0
-                ),
-                "num_target_rows_deleted": metrics.get(
-                    "num_target_rows_deleted", 0
-                ),
-                "num_target_files_added": metrics.get(
-                    "num_target_files_added", 0
-                ),
-                "num_target_files_removed": metrics.get(
-                    "num_target_files_removed", 0
-                ),
-                "execution_time_ms": metrics.get("execution_time_ms", 0),
-                "scan_time_ms": metrics.get("scan_time_ms", 0),
-                "rewrite_time_ms": metrics.get("rewrite_time_ms", 0),
-            }
+    now = datetime.now(timezone.utc)
+    audit_item = {
+        "file_id": f"{source_bucket}/{source_key}",
+        "processed_at": now.isoformat(),
+        "processed_date": now.date().isoformat(),
+        "status": "SUCCEEDED",
+        "source_bucket": source_bucket,
+        "source_key": source_key,
+        "schema_name": schema_name,
+        "table_name": table_name,
+        "target_path": target_path,
+        "input_rows": int(input_rows),
+        "final_state_rows": int(final_state_rows),
+        "merge_attempt": int(attempt),
+        "num_source_rows": int(metrics.get("num_source_rows", 0)),
+        "num_target_rows_inserted": int(metrics.get(
+            "num_target_rows_inserted", 0
+        )),
+        "num_target_rows_updated": int(metrics.get(
+            "num_target_rows_updated", 0
+        )),
+        "num_target_rows_deleted": int(metrics.get(
+            "num_target_rows_deleted", 0
+        )),
+        "num_target_files_added": int(metrics.get(
+            "num_target_files_added", 0
+        )),
+        "num_target_files_removed": int(metrics.get(
+            "num_target_files_removed", 0
+        )),
+        "execution_time_ms": int(metrics.get("execution_time_ms", 0)),
+        "scan_time_ms": int(metrics.get("scan_time_ms", 0)),
+        "rewrite_time_ms": int(metrics.get("rewrite_time_ms", 0)),
+    }
 
-            audit_df = pd.DataFrame([audit_row])
+    audit_table.put_item(Item=audit_item)
 
-            write_deltalake(
-                table_or_uri=audit_path,
-                data=pa.Table.from_pandas(audit_df, preserve_index=False),
-                mode="append",
-                schema_mode="merge",
-            )
-
-            logger.info(
-                "Audit append succeeded; source=s3://%s/%s; "
-                "audit_attempt=%s",
-                source_bucket,
-                source_key,
-                audit_attempt,
-            )
-            return
-        except Exception as exc:
-            if audit_attempt == max_attempts:
-                logger.exception(
-                    "Audit append failed after %s attempts; "
-                    "source=s3://%s/%s",
-                    max_attempts,
-                    source_bucket,
-                    source_key,
-                )
-                return
-
-            sleep_seconds = min(
-                5.0,
-                (2 ** (audit_attempt - 1))
-                + random.uniform(0.1, 0.5),
-            )
-
-            logger.warning(
-                "Audit append failed; source=s3://%s/%s; "
-                "attempt=%s/%s; error=%s; retrying in %.2fs",
-                source_bucket,
-                source_key,
-                audit_attempt,
-                max_attempts,
-                exc,
-                sleep_seconds,
-            )
-            time.sleep(sleep_seconds)
+    logger.info(
+        "Audit write succeeded; source=s3://%s/%s; "
+        "audit_attempt=%s",
+        source_bucket,
+        source_key,
+    )
 
 
 def process_parquet(
@@ -382,7 +345,7 @@ def process_parquet(
     s3_target_bucket: str,
     s3_target_path: str,
     audit_logs: bool,
-    audit_path: str,
+    audit_table: str,
 ):
     schema_name, table_name = extract_schema_table_from_s3_key(s3_source_key, s3_source_cdc_path)
     pk_cols = load_primary_keys(schema_name, table_name)
@@ -428,7 +391,7 @@ def process_parquet(
 
     if audit_logs:
         append_merge_audit(
-            audit_path=(f"s3://{s3_target_bucket}/{audit_path}/"),
+            audit_table=audit_table,
             source_bucket=s3_source_bucket,
             source_key=s3_source_key,
             schema_name=schema_name,
@@ -449,7 +412,7 @@ def lambda_handler(event, context):
         s3_target_path = os.environ.get('S3_TARGET_PATH', '')
         type_of_event = os.environ['EVENT_TYPE']
         audit_logs = os.environ.get('AUDIT_LOGS', 'false').lower() == 'true'
-        audit_path = os.environ.get('AUDIT_LOGS_PATH', 'cdc_delta_audit')
+        audit_table = os.environ['AUDIT_TABLE_NAME']
     except KeyError as e:
         logger.error(f"Missing env variable: {e}")
         raise RuntimeError(f"Configuration error: {e}")
@@ -493,7 +456,7 @@ def lambda_handler(event, context):
             s3_target_bucket=s3_target_bucket,
             s3_target_path=s3_target_path,
             audit_logs=audit_logs,
-            audit_path=audit_path
+            audit_table=audit_table
         )
 
         processed += 1

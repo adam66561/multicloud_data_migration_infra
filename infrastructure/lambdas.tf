@@ -27,9 +27,8 @@ module "lambda_merge_delta" {
   config_s3_bucket_id = module.lambda_tests.s3_bucket_id
   config_key          = aws_s3_object.lambda_tests_config.key
 
-  type_of_event   = "fifo"
-  audit_logs      = true
-  audit_logs_path = "cdc_delta_audit"
+  type_of_event = "fifo"
+  audit_logs    = true
 }
 
 # module "lambda_merge_delta_wp" {

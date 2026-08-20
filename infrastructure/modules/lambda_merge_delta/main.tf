@@ -58,7 +58,13 @@ data "aws_iam_policy_document" "this" {
       "dms:DescribeTableStatistics",
       "sqs:ReceiveMessage",
       "sqs:DeleteMessage",
-      "sqs:GetQueueAttributes"
+      "sqs:GetQueueAttributes",
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:DescribeTable",
+      "dynamodb:Query",
     ]
     resources = [
       "arn:${local.partition}:glue:${local.region}:${local.account_id}:catalog",
@@ -67,6 +73,7 @@ data "aws_iam_policy_document" "this" {
       "arn:${local.partition}:s3:::*",
       "arn:${local.partition}:s3:::*/*",
       "arn:${local.partition}:sqs:${local.region}:${local.account_id}:*",
+      "arn:${local.partition}:dynamodb:${local.region}:${local.account_id}:table/*",
     ]
   }
 }
@@ -139,7 +146,7 @@ resource "aws_lambda_function" "this" {
       S3_TARGET_PATH                      = var.target_path
       EVENT_TYPE                          = var.type_of_event
       AUDIT_LOGS                          = var.audit_logs ? "true" : "false"
-      AUDIT_LOGS_PATH                     = var.audit_logs_path
+      AUDIT_TABLE_NAME                    = var.audit_logs ? aws_dynamodb_table.merge_audit[0].name : ""
     }
   }
 
@@ -284,4 +291,16 @@ resource "aws_lambda_event_source_mapping" "sqs" {
   depends_on = [
     aws_iam_role_policy_attachment.this
   ]
+}
+
+resource "aws_dynamodb_table" "merge_audit" {
+  count = var.audit_logs ? 1 : 0
+  name         = join(local.default_separator, [var.prefix, "merge", "audit"])
+  billing_mode = "PAY_PER_REQUEST"
+  
+  attribute { 
+    name = "file_id" 
+    type = "S" 
+  }
+  hash_key     = "file_id"
 }

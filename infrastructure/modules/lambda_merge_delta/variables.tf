@@ -43,8 +43,3 @@ variable "audit_logs" {
   type    = bool
   default = false
 }
-
-variable "audit_logs_path" {
-  type    = string
-  default = "cdc_delta_audit"
-}
