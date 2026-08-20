@@ -291,53 +291,88 @@ def append_merge_audit(
     final_state_rows: int,
     metrics: dict,
     attempt: int,
+    max_attempts: int = 3,
 ) -> None:
-    audit_row = {
-        "processed_at": datetime.now(timezone.utc),
-        "processed_date": datetime.now(timezone.utc).date().isoformat(),
-        "status": "SUCCEEDED",
-        "source_bucket": source_bucket,
-        "source_key": source_key,
-        "schema_name": schema_name,
-        "table_name": table_name,
-        "target_path": target_path,
-        "input_rows": input_rows,
-        "final_state_rows": final_state_rows,
-        "merge_attempt": attempt,
-        "num_source_rows": metrics.get("num_source_rows", 0),
-        "num_target_rows_inserted": metrics.get(
-            "num_target_rows_inserted", 0
-        ),
-        "num_target_rows_updated": metrics.get(
-            "num_target_rows_updated", 0
-        ),
-        "num_target_rows_deleted": metrics.get(
-            "num_target_rows_deleted", 0
-        ),
-        "num_target_files_added": metrics.get(
-            "num_target_files_added", 0
-        ),
-        "num_target_files_removed": metrics.get(
-            "num_target_files_removed", 0
-        ),
-        "execution_time_ms": metrics.get("execution_time_ms", 0),
-        "scan_time_ms": metrics.get("scan_time_ms", 0),
-        "rewrite_time_ms": metrics.get("rewrite_time_ms", 0),
-    }
+    for audit_attempt in range(1, max_attempts + 1):
+        try:
+            audit_row = {
+                "processed_at": datetime.now(timezone.utc),
+                "processed_date": datetime.now(timezone.utc).date().isoformat(),
+                "status": "SUCCEEDED",
+                "source_bucket": source_bucket,
+                "source_key": source_key,
+                "schema_name": schema_name,
+                "table_name": table_name,
+                "target_path": target_path,
+                "input_rows": input_rows,
+                "final_state_rows": final_state_rows,
+                "merge_attempt": attempt,
+                "num_source_rows": metrics.get("num_source_rows", 0),
+                "num_target_rows_inserted": metrics.get(
+                    "num_target_rows_inserted", 0
+                ),
+                "num_target_rows_updated": metrics.get(
+                    "num_target_rows_updated", 0
+                ),
+                "num_target_rows_deleted": metrics.get(
+                    "num_target_rows_deleted", 0
+                ),
+                "num_target_files_added": metrics.get(
+                    "num_target_files_added", 0
+                ),
+                "num_target_files_removed": metrics.get(
+                    "num_target_files_removed", 0
+                ),
+                "execution_time_ms": metrics.get("execution_time_ms", 0),
+                "scan_time_ms": metrics.get("scan_time_ms", 0),
+                "rewrite_time_ms": metrics.get("rewrite_time_ms", 0),
+            }
 
-    audit_df = pd.DataFrame([audit_row])
+            audit_df = pd.DataFrame([audit_row])
 
-    write_deltalake(
-        table_or_uri=audit_path,
-        data=pa.Table.from_pandas(audit_df, preserve_index=False),
-        mode="append",
-        schema_mode="merge",
-    )
+            write_deltalake(
+                table_or_uri=audit_path,
+                data=pa.Table.from_pandas(audit_df, preserve_index=False),
+                mode="append",
+                schema_mode="merge",
+            )
 
-    logger.info(
-        f"Audit appended for source file "
-        f"s3://{source_bucket}/{source_key}"
-    )
+            logger.info(
+                "Audit append succeeded; source=s3://%s/%s; "
+                "audit_attempt=%s",
+                source_bucket,
+                source_key,
+                audit_attempt,
+            )
+            return
+        except Exception as exc:
+            if audit_attempt == max_attempts:
+                logger.exception(
+                    "Audit append failed after %s attempts; "
+                    "source=s3://%s/%s",
+                    max_attempts,
+                    source_bucket,
+                    source_key,
+                )
+                return
+
+            sleep_seconds = min(
+                5.0,
+                (2 ** (audit_attempt - 1))
+                + random.uniform(0.1, 0.5),
+            )
+
+            logger.warning(
+                "Audit append failed; source=s3://%s/%s; "
+                "attempt=%s/%s; error=%s; retrying in %.2fs",
+                source_bucket,
+                source_key,
+                audit_attempt,
+                max_attempts,
+                exc,
+                sleep_seconds,
+            )
+            time.sleep(sleep_seconds)
 
 
 def process_parquet(
@@ -392,26 +427,18 @@ def process_parquet(
     )
 
     if audit_logs:
-        try:
-            append_merge_audit(
-                audit_path=(f"s3://{s3_target_bucket}/{audit_path}/"),
-                source_bucket=s3_source_bucket,
-                source_key=s3_source_key,
-                schema_name=schema_name,
-                table_name=table_name,
-                target_path=s3_target_path,
-                input_rows=len(df),
-                final_state_rows=len(final_df),
-                metrics=metrics,
-                attempt=attempt,
-            )
-        except Exception:
-            logger.exception(
-                "Target merge succeeded but audit append failed; "
-                "source=%s/%s",
-                s3_source_bucket,
-                s3_source_key,
-            )
+        append_merge_audit(
+            audit_path=(f"s3://{s3_target_bucket}/{audit_path}/"),
+            source_bucket=s3_source_bucket,
+            source_key=s3_source_key,
+            schema_name=schema_name,
+            table_name=table_name,
+            target_path=s3_target_path,
+            input_rows=len(df),
+            final_state_rows=len(final_df),
+            metrics=metrics,
+            attempt=attempt,
+        )
 
 
 def lambda_handler(event, context):

@@ -20,9 +20,6 @@ module "lambda_merge_delta" {
   source = "./modules/lambda_merge_delta"
   prefix = join(local.default_separator, [local.prefix, "lambda", "merge", "delta"])
 
-  glue_database_name = ["pasx", "wltuser"]
-  glue_catalog_id    = data.aws_caller_identity.current.account_id
-
   source_s3_bucket_id = module.lambda_tests.s3_bucket_id
   source_cdc_path     = "cdc"
   target_s3_bucket_id = module.lambda_tests.s3_bucket_id

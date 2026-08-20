@@ -1,14 +1,6 @@
 variable "prefix" { type = string }
-
-variable "glue_catalog_id" { type = string }
-variable "glue_database_name" { type = list(string) }
-
-# variable "s3_objects" { type        = list(string) }
-
 variable "source_s3_bucket_id" { type = string }
-variable "source_cdc_path" { type = string }
 variable "target_s3_bucket_id" { type = string }
-variable "target_path" { type = string }
 variable "config_s3_bucket_id" { type = string }
 variable "config_key" { type = string }
 
@@ -25,6 +17,16 @@ variable "lambda_timeout" {
 variable "logs_retention_in_days" {
   type    = number
   default = 30
+}
+
+variable "source_cdc_path" { 
+  type = string 
+  default = "cdc"
+}
+
+variable "target_path" { 
+  type = string 
+  default = "" 
 }
 
 variable "type_of_event" {
