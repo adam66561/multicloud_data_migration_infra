@@ -190,3 +190,34 @@ def lambda_handler(event, context):
     )
 
     return response
+
+
+
+
+#     {
+#   "bucket": "dev-multicloud-lambda-tests",
+#   "subcatalogs": [
+#     {
+#       "path": "pasx/batchrecord",
+#       "records": [
+#         {
+#         "op": "I",
+#         "entitykey": "customer_1",
+#         "optime": "2026-08-20T08:30:00Z",
+#         "quantity": 1,
+#         "newcol": "new_value_1",
+#         "newcol2": "new_value_2"
+#         },
+#         {
+#         "op": "I",
+#         "entitykey": "customer_2",
+#         "optime": "2026-08-20T08:30:00Z",
+#         "quantity": 1,
+#         "newcol": "new_value_1",
+#         "newcol2": "new_value_2",
+#         "newcol3": "new_value_3"
+#         }
+#       ]
+#     }
+#   ]
+# }

@@ -52,12 +52,6 @@ data "aws_iam_policy_document" "this" {
       "s3:*Object",
       "s3:ListBucket",
       "s3:GetBucketLocation",
-      # "dynamodb:GetItem",
-      # "dynamodb:PutItem",
-      # "dynamodb:UpdateItem",
-      # "dynamodb:DeleteItem",
-      # "dynamodb:DescribeTable",
-      # "dynamodb:Query",
       "glue:GetDatabase",
       "glue:GetTables",
       "dms:DescribeReplicationTasks",
@@ -73,7 +67,6 @@ data "aws_iam_policy_document" "this" {
       "arn:${local.partition}:s3:::*",
       "arn:${local.partition}:s3:::*/*",
       "arn:${local.partition}:sqs:${local.region}:${local.account_id}:*",
-      # "${aws_dynamodb_table.delta_lock.arn}"
     ]
   }
 }
@@ -141,12 +134,12 @@ resource "aws_lambda_function" "this" {
       S3_CONFIG_BUCKET                    = var.config_s3_bucket_id
       S3_CONFIG_KEY                       = var.config_key
       S3_SOURCE_BUCKET                    = var.source_s3_bucket_id
+      S3_SOURCE_CDC_PATH                  = var.source_cdc_path
       S3_TARGET_BUCKET                    = var.target_s3_bucket_id
-      EVENT_TYPE                   = var.type_of_event
-
-      # GLUE_CATALOG_ID            = coalesce(var.glue_catalog_id, local.account_id)
-      # GLUE_DATABASE_NAME         = join(",", var.glue_database_name)
-      # TASK_ARN = var.dms_task_arn
+      S3_TARGET_PATH                      = var.target_path
+      EVENT_TYPE                          = var.type_of_event
+      AUDIT_LOGS                          = var.audit_logs ? "true" : "false"
+      AUDIT_LOGS_PATH                     = var.audit_logs_path
     }
   }
 
@@ -178,7 +171,7 @@ resource "aws_s3_bucket_notification" "load_parquet_created" {
   dynamic "lambda_function" {
     for_each = var.type_of_event == "s3" ? {
       for v in local.cdc_tables : v => {
-        load_prefix = "cdc/${lower(element(split(".", v), 0))}/${lower(element(split(".", v), 1))}/"
+        load_prefix = "${var.source_cdc_path}/${lower(element(split(".", v), 0))}/${lower(element(split(".", v), 1))}/"
       }
     } : {}
 
@@ -227,7 +220,7 @@ resource "aws_cloudwatch_event_rule" "cdc_parquet_created" {
     detail-type = [ "Object Created" ]
     detail = {
       bucket = { name = [var.source_s3_bucket_id] }
-      object = { key = [{ wildcard = "cdc/${lower(element(split(".", each.value), 0))}/${lower(element(split(".", each.value), 1))}/*.parquet" }] }
+      object = { key = [{ wildcard = "${var.source_cdc_path}/${lower(element(split(".", each.value), 0))}/${lower(element(split(".", each.value), 1))}/*.parquet" }] }
     }
   })
 }
@@ -291,17 +284,4 @@ resource "aws_lambda_event_source_mapping" "sqs" {
   depends_on = [
     aws_iam_role_policy_attachment.this
   ]
-}
-
-resource "aws_dynamodb_table" "processed_files" {
-  count = var.create_dynamodb ? 1 : 0
-  
-  name         = join(local.default_separator, [var.prefix, "cdc", "processed", "files"])
-  billing_mode = "PAY_PER_REQUEST"
-  
-  attribute { 
-    name = "key" 
-    type = "S" 
-  }
-  hash_key     = "key"
 }

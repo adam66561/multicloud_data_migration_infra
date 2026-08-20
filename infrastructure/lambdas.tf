@@ -24,12 +24,15 @@ module "lambda_merge_delta" {
   glue_catalog_id    = data.aws_caller_identity.current.account_id
 
   source_s3_bucket_id = module.lambda_tests.s3_bucket_id
+  source_cdc_path     = "cdc"
   target_s3_bucket_id = module.lambda_tests.s3_bucket_id
+  target_path         = ""
   config_s3_bucket_id = module.lambda_tests.s3_bucket_id
   config_key          = aws_s3_object.lambda_tests_config.key
 
-  create_dynamodb = false
   type_of_event   = "fifo"
+  audit_logs      = true
+  audit_logs_path = "cdc_delta_audit"
 }
 
 # module "lambda_merge_delta_wp" {

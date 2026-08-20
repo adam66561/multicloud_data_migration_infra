@@ -5,13 +5,14 @@ import logging
 import os
 import random
 import time
+from datetime import datetime, timezone
 
 from typing import List, Tuple
 from io import BytesIO
 
 import pandas as pd
 import pyarrow as pa
-from deltalake import DeltaTable
+from deltalake import DeltaTable, write_deltalake
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -23,7 +24,12 @@ def delta_table_exists(path: str) -> bool:
     try:
         DeltaTable(path)
         return True
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Unable to load Delta table at %s: %s",
+            path,
+            exc,
+        )
         return False
 
 
@@ -43,16 +49,24 @@ def load_primary_keys(schema_name: str, table_name: str) -> List[str]:
 def read_parquet(bucket: str, key: str, pk_cols: List[str]) -> pd.DataFrame:
     try:
         response = S3_CLIENT.get_object(Bucket=bucket, Key=key,)
-    except ClientError as e:
-        if e.response["Error"]["Code"] in (
-            "NoSuchKey",
-            "404",
-        ):
+    except ClientError as exc:
+        error_code = exc.response["Error"]["Code"]
+
+        if error_code in ("NoSuchKey", "404"):
             logger.warning(
-                f"CDC file no longer exists, skipping: "
-                f"s3://{bucket}/{key}"
+                "CDC file no longer exists; skipping: s3://%s/%s",
+                bucket,
+                key,
             )
             return None
+
+        logger.exception(
+            "Unable to read CDC object: s3://%s/%s; code=%s",
+            bucket,
+            key,
+            error_code,
+        )
+        raise
 
     df = pd.read_parquet(
         BytesIO(response["Body"].read()),
@@ -91,21 +105,29 @@ def read_parquet(bucket: str, key: str, pk_cols: List[str]) -> pd.DataFrame:
     return df
 
 
-def extract_schema_table_from_s3_key(key: str) -> Tuple[str, str]:
-    parts = [
-        part
-        for part in key.strip("/").split("/")
-        if part
-    ]
+def extract_schema_table_from_s3_key(key: str, cdc_path: str) -> Tuple[str, str]:
+    key_parts = [ part for part in key.strip("/").split("/") if part ]
+    prefix_parts = [ part for part in cdc_path.strip("/").split("/") if part ]
 
-    if len(parts) < 4:
+    if key_parts[:len(prefix_parts)] != prefix_parts:
         raise RuntimeError(
-            "cdc S3 key must contain at least "
-            "cdc/<schema>/<table>/<file.parquet>. "
+            f"S3 key does not start with configured CDC path. "
+            f"key={key}, cdc_path={cdc_path}"
+        )
+
+    relative_parts = key_parts[len(prefix_parts):]
+
+    if len(relative_parts) < 3:
+        raise RuntimeError(
+            "CDC S3 key must contain "
+            "<cdc-prefix>/<schema>/<table>/<file.parquet>. "
             f"Received: {key}"
         )
 
-    return parts[1].lower(), parts[2].lower()
+    schema_name = relative_parts[0].lower()
+    table_name = relative_parts[1].lower()
+
+    return schema_name, table_name
 
 
 def merge_once(
@@ -159,7 +181,7 @@ def merge_once(
         for column in df.columns
     }
 
-    (
+    metrics = (
         dt.merge(
             source=source_table,
             predicate=merge_predicate,
@@ -183,6 +205,8 @@ def merge_once(
         .execute()
     )
 
+    return metrics
+
 
 def merge_with_retry(
     df: pd.DataFrame,
@@ -192,14 +216,14 @@ def merge_with_retry(
 ):
     for attempt in range(1, max_attempts + 1):
         try:
-            merge_once(
+            metrics = merge_once(
                 df=df,
                 s3_target_path=s3_target_path,
                 pk_cols=pk_cols,
             )
 
             logger.info(f"SUCCESS: completed for {s3_target_path}")
-            return
+            return metrics, attempt
 
         except Exception as e:
             if attempt == max_attempts:
@@ -256,16 +280,83 @@ def build_final_state(
     return pd.DataFrame(final_rows).reset_index(drop=True)
 
 
+def append_merge_audit(
+    audit_path: str,
+    source_bucket: str,
+    source_key: str,
+    schema_name: str,
+    table_name: str,
+    target_path: str,
+    input_rows: int,
+    final_state_rows: int,
+    metrics: dict,
+    attempt: int,
+) -> None:
+    audit_row = {
+        "processed_at": datetime.now(timezone.utc),
+        "processed_date": datetime.now(timezone.utc).date().isoformat(),
+        "status": "SUCCEEDED",
+        "source_bucket": source_bucket,
+        "source_key": source_key,
+        "schema_name": schema_name,
+        "table_name": table_name,
+        "target_path": target_path,
+        "input_rows": input_rows,
+        "final_state_rows": final_state_rows,
+        "merge_attempt": attempt,
+        "num_source_rows": metrics.get("num_source_rows", 0),
+        "num_target_rows_inserted": metrics.get(
+            "num_target_rows_inserted", 0
+        ),
+        "num_target_rows_updated": metrics.get(
+            "num_target_rows_updated", 0
+        ),
+        "num_target_rows_deleted": metrics.get(
+            "num_target_rows_deleted", 0
+        ),
+        "num_target_files_added": metrics.get(
+            "num_target_files_added", 0
+        ),
+        "num_target_files_removed": metrics.get(
+            "num_target_files_removed", 0
+        ),
+        "execution_time_ms": metrics.get("execution_time_ms", 0),
+        "scan_time_ms": metrics.get("scan_time_ms", 0),
+        "rewrite_time_ms": metrics.get("rewrite_time_ms", 0),
+    }
+
+    audit_df = pd.DataFrame([audit_row])
+
+    write_deltalake(
+        table_or_uri=audit_path,
+        data=pa.Table.from_pandas(audit_df, preserve_index=False),
+        mode="append",
+        schema_mode="merge",
+    )
+
+    logger.info(
+        f"Audit appended for source file "
+        f"s3://{source_bucket}/{source_key}"
+    )
+
+
 def process_parquet(
     s3_source_bucket: str,
     s3_source_key: str,
+    s3_source_cdc_path: str,
     s3_target_bucket: str,
+    s3_target_path: str,
+    audit_logs: bool,
+    audit_path: str,
 ):
-    schema_name, table_name = extract_schema_table_from_s3_key(s3_source_key)
+    schema_name, table_name = extract_schema_table_from_s3_key(s3_source_key, s3_source_cdc_path)
     pk_cols = load_primary_keys(schema_name, table_name)
     table_key = f"{schema_name}.{table_name}"
 
-    s3_target_path = (f"s3://{s3_target_bucket}/{schema_name}/{table_name}/")
+    if s3_target_path == "":
+        s3_target_path = (f"s3://{s3_target_bucket}/{schema_name}/{table_name}/")
+    else:
+        s3_target_path = (f"s3://{s3_target_bucket}/{s3_target_path}/{schema_name}/{table_name}/")
 
     if not delta_table_exists(s3_target_path):
         raise RuntimeError(
@@ -285,20 +376,53 @@ def process_parquet(
 
     final_df = build_final_state(df, pk_cols)
 
-    if not final_df.empty:
-        merge_with_retry(
-            df=final_df,
-            s3_target_path=s3_target_path,
-            pk_cols=pk_cols,
-            max_attempts=3,
+    if final_df.empty:
+        logger.info(
+            "No final CDC state to merge; source=s3://%s/%s",
+            s3_source_bucket,
+            s3_source_key,
         )
+        return
+
+    metrics, attempt = merge_with_retry(
+        df=final_df,
+        s3_target_path=s3_target_path,
+        pk_cols=pk_cols,
+        max_attempts=3,
+    )
+
+    if audit_logs:
+        try:
+            append_merge_audit(
+                audit_path=(f"s3://{s3_target_bucket}/{audit_path}/"),
+                source_bucket=s3_source_bucket,
+                source_key=s3_source_key,
+                schema_name=schema_name,
+                table_name=table_name,
+                target_path=s3_target_path,
+                input_rows=len(df),
+                final_state_rows=len(final_df),
+                metrics=metrics,
+                attempt=attempt,
+            )
+        except Exception:
+            logger.exception(
+                "Target merge succeeded but audit append failed; "
+                "source=%s/%s",
+                s3_source_bucket,
+                s3_source_key,
+            )
 
 
 def lambda_handler(event, context):
     try:
         s3_source_bucket = os.environ['S3_SOURCE_BUCKET']
+        s3_source_cdc_path = os.environ['S3_SOURCE_CDC_PATH']
         s3_target_bucket = os.environ['S3_TARGET_BUCKET']
+        s3_target_path = os.environ.get('S3_TARGET_PATH', '')
         type_of_event = os.environ['EVENT_TYPE']
+        audit_logs = os.environ.get('AUDIT_LOGS', 'false').lower() == 'true'
+        audit_path = os.environ.get('AUDIT_LOGS_PATH', 'cdc_delta_audit')
     except KeyError as e:
         logger.error(f"Missing env variable: {e}")
         raise RuntimeError(f"Configuration error: {e}")
@@ -338,7 +462,11 @@ def lambda_handler(event, context):
         process_parquet(
             s3_source_bucket=event_bucket,
             s3_source_key=event_key,
+            s3_source_cdc_path=s3_source_cdc_path,
             s3_target_bucket=s3_target_bucket,
+            s3_target_path=s3_target_path,
+            audit_logs=audit_logs,
+            audit_path=audit_path
         )
 
         processed += 1

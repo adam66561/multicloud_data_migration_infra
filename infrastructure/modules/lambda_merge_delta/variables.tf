@@ -6,7 +6,9 @@ variable "glue_database_name" { type = list(string) }
 # variable "s3_objects" { type        = list(string) }
 
 variable "source_s3_bucket_id" { type = string }
+variable "source_cdc_path" { type = string }
 variable "target_s3_bucket_id" { type = string }
+variable "target_path" { type = string }
 variable "config_s3_bucket_id" { type = string }
 variable "config_key" { type = string }
 
@@ -25,11 +27,6 @@ variable "logs_retention_in_days" {
   default = 30
 }
 
-variable "create_dynamodb" {
-  type    = bool
-  default = false
-}
-
 variable "type_of_event" {
   type    = string
   default = "fifo"
@@ -38,4 +35,14 @@ variable "type_of_event" {
     condition     = contains(["s3", "fifo"], var.type_of_event)
     error_message = "type_of_event must be either 's3' or 'fifo'"
   }
+}
+
+variable "audit_logs" {
+  type    = bool
+  default = false
+}
+
+variable "audit_logs_path" {
+  type    = string
+  default = "cdc_delta_audit"
 }
