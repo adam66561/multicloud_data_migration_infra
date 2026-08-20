@@ -332,8 +332,7 @@ def append_merge_audit(
     audit_table.put_item(Item=audit_item)
 
     logger.info(
-        "Audit write succeeded; source=s3://%s/%s; "
-        "audit_attempt=%s",
+        "Audit write succeeded; source=s3://%s/%s",
         source_bucket,
         source_key,
     )
