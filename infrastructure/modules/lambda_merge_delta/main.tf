@@ -21,7 +21,7 @@ locals {
   partition         = data.aws_partition.current.partition
   region            = data.aws_region.this.region
 
-  cdc_tables = toset(["pasx.batchrecord", "wltuser.lsvcharge"])
+  cdc_tables = toset(["pasx.batchrecord", "wltuser.lsvcharge"]) # needs to be changed for s3 objects from txt map
 }
 
 data "aws_caller_identity" "this" {}
@@ -52,24 +52,17 @@ data "aws_iam_policy_document" "this" {
       "s3:*Object",
       "s3:ListBucket",
       "s3:GetBucketLocation",
-      "glue:GetDatabase",
-      "glue:GetTables",
-      "dms:DescribeReplicationTasks",
-      "dms:DescribeTableStatistics",
       "sqs:ReceiveMessage",
       "sqs:DeleteMessage",
       "sqs:GetQueueAttributes",
-      "dynamodb:GetItem",
+      # "dynamodb:GetItem",
       "dynamodb:PutItem",
-      "dynamodb:UpdateItem",
-      "dynamodb:DeleteItem",
-      "dynamodb:DescribeTable",
-      "dynamodb:Query",
+      # "dynamodb:UpdateItem",
+      # "dynamodb:DeleteItem",
+      # "dynamodb:DescribeTable",
+      # "dynamodb:Query",
     ]
     resources = [
-      "arn:${local.partition}:glue:${local.region}:${local.account_id}:catalog",
-      "arn:${local.partition}:glue:${local.region}:${local.account_id}:database/*",
-      "arn:${local.partition}:glue:${local.region}:${local.account_id}:table/*/*",
       "arn:${local.partition}:s3:::*",
       "arn:${local.partition}:s3:::*/*",
       "arn:${local.partition}:sqs:${local.region}:${local.account_id}:*",
@@ -94,7 +87,7 @@ resource "aws_iam_role_policy_attachment" "AWSLambdaBasicExecutionRole" {
 }
 
 resource "aws_ecr_repository" "this" {
-  name                 = join(local.default_separator, [var.prefix, "lambda"])
+  name                 = join(local.default_separator, [var.prefix, var.name, "ecr", "repository"])
   image_tag_mutability = "MUTABLE"
   force_delete         = true
 
@@ -129,7 +122,7 @@ data "aws_ecr_image" "latest" {
 resource "aws_lambda_function" "this" {
   publish          = true
   description      = local.default_desc
-  function_name    = var.prefix
+  function_name    = join(local.default_separator, [var.prefix, var.name])
   memory_size      = var.lambda_memory_size
   timeout          = var.lambda_timeout
   role             = aws_iam_role.this.arn
@@ -197,7 +190,7 @@ resource "aws_s3_bucket_notification" "load_parquet_created" {
 resource "aws_sqs_queue" "this" {
   count = var.type_of_event == "fifo" ? 1 : 0
 
-  name       = "${join(local.default_separator, [var.prefix, "fifo"])}.fifo"
+  name       = "${join(local.default_separator, [var.prefix, var.name, "fifo"])}.fifo"
   fifo_queue = true
 
   visibility_timeout_seconds = 300
@@ -214,13 +207,13 @@ resource "aws_sqs_queue" "this" {
 
 resource "aws_sqs_queue" "dlq" {
   count = var.type_of_event == "fifo" ? 1 : 0
-  name       = "${join(local.default_separator, [var.prefix, "dlq"])}.fifo"
+  name       = "${join(local.default_separator, [var.prefix, var.name, "dlq"])}.fifo"
   fifo_queue = true
 }
 
 resource "aws_cloudwatch_event_rule" "cdc_parquet_created" {
   for_each = var.type_of_event == "fifo" ? local.cdc_tables : toset([])
-  name = join(local.default_separator, [var.prefix, replace(each.key, ".", "-")])
+  name = join(local.default_separator, [var.prefix, var.name, replace(each.key, ".", "-")])
 
   event_pattern = jsonencode({
     source = [ "aws.s3" ]
@@ -295,7 +288,7 @@ resource "aws_lambda_event_source_mapping" "sqs" {
 
 resource "aws_dynamodb_table" "merge_audit" {
   count = var.audit_logs ? 1 : 0
-  name         = join(local.default_separator, [var.prefix, "merge", "audit"])
+  name         = join(local.default_separator, [var.prefix, var.name, "audit", "table"])
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "file_id"
   

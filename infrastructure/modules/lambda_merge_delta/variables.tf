@@ -1,4 +1,5 @@
 variable "prefix" { type = string }
+variable "name" { type = string }
 variable "source_s3_bucket_id" { type = string }
 variable "target_s3_bucket_id" { type = string }
 variable "config_s3_bucket_id" { type = string }

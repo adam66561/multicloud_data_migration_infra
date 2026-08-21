@@ -18,7 +18,8 @@ module "lambda_convert_delta" {
 
 module "lambda_merge_delta" {
   source = "./modules/lambda_merge_delta"
-  prefix = join(local.default_separator, [local.prefix, "lambda", "merge", "delta"])
+  prefix = join(local.default_separator, [local.prefix, "site", "dev"])
+  name   = join(local.default_separator, ["lambda", "merge", "delta"])
 
   source_s3_bucket_id = module.lambda_tests.s3_bucket_id
   source_cdc_path     = "cdc"
