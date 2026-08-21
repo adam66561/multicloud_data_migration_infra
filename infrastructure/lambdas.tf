@@ -28,7 +28,8 @@ module "lambda_merge_delta" {
   config_s3_bucket_id = module.lambda_tests.s3_bucket_id
   config_key          = aws_s3_object.lambda_tests_config.key
 
-  type_of_event = "fifo"
+  #would be good to decide which to use, code will be easier to read
+  type_of_event = "fifo" 
   audit_logs    = true
 }
 

@@ -55,12 +55,7 @@ data "aws_iam_policy_document" "this" {
       "sqs:ReceiveMessage",
       "sqs:DeleteMessage",
       "sqs:GetQueueAttributes",
-      # "dynamodb:GetItem",
       "dynamodb:PutItem",
-      # "dynamodb:UpdateItem",
-      # "dynamodb:DeleteItem",
-      # "dynamodb:DescribeTable",
-      # "dynamodb:Query",
     ]
     resources = [
       "arn:${local.partition}:s3:::*",
@@ -237,6 +232,7 @@ resource "aws_cloudwatch_event_target" "sqs" {
 }
 
 data "aws_iam_policy_document" "sqs_eventbridge" {
+  count = var.type_of_event == "fifo" ? 1 : 0
   statement {
     effect = "Allow"
 
@@ -269,7 +265,7 @@ resource "aws_sqs_queue_policy" "eventbridge" {
   count = var.type_of_event == "fifo" ? 1 : 0
 
   queue_url = aws_sqs_queue.this[0].id
-  policy    = data.aws_iam_policy_document.sqs_eventbridge.json
+  policy    = data.aws_iam_policy_document.sqs_eventbridge[0].json
 }
 
 resource "aws_lambda_event_source_mapping" "sqs" {
