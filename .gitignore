@@ -21,3 +21,6 @@ terraformrc
 *.zip
 
 secrets.txt
+
+__pycache__/
+.pytest_cache/
