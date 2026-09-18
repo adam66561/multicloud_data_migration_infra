@@ -1,9 +1,9 @@
 {
-    "schema_target1.table1": [
+    "pasx.batchrecord": [
         "id1",
         "id2"
     ],
-    "schema_target2.table2": [
+    "wltuser.lsvcharge": [
         "id3"
     ]
 }
