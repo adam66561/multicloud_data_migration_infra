@@ -3,6 +3,7 @@
 # AWS DMS       S3 parquet
 # --------      ----------
 # BYTES	        BINARY
+# BLOB	        BINARY
 # DATE	        DATE32
 # TIME	        TIME32
 # DATETIME	    TIMESTAMP
@@ -15,7 +16,6 @@
 # REAL8	        DOUBLE
 # STRING	    STRING
 # WSTRING	    STRING
-# BLOB	        BINARY
 # NCLOB	        STRING
 # CLOB	        STRING
 # BOOLEAN	    BOOL
