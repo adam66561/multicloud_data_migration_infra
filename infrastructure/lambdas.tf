@@ -18,19 +18,28 @@ module "lambda_convert_delta" {
 
 module "lambda_merge_delta" {
   source = "./modules/lambda_merge_delta"
-  prefix = join(local.default_separator, [local.prefix, "site", "dev"])
-  name   = join(local.default_separator, ["lambda", "merge", "delta"])
+  prefix = join(local.default_separator, [local.prefix, "test"])
+
+  s3_prefixes_per_schema = {
+    schema1 = {
+      source = "schema1_cdc"
+      target = "schema1_target"
+    }
+    schema2 = {
+      source = "schema2_cdc"
+      target = "schema2_target"
+    }
+  }
 
   source_s3_bucket_id = module.lambda_tests.s3_bucket_id
-  source_cdc_path     = "cdc"
   target_s3_bucket_id = module.lambda_tests.s3_bucket_id
-  target_path         = ""
+
   config_s3_bucket_id = module.lambda_tests.s3_bucket_id
   config_key          = aws_s3_object.lambda_tests_config.key
+  s3_objects          = distinct(sort(compact([for line in split("\n", file("./sources.txt")) : trimspace(line)])))
 
-  #would be good to decide which to use, code will be easier to read
-  type_of_event = "fifo" 
-  audit_logs    = true
+  audit_logs                     = true
+  date_partition_subfolder_count = 1
 }
 
 # module "lambda_merge_delta_wp" {

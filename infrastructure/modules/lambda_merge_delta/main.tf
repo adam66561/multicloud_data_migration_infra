@@ -20,8 +20,20 @@ locals {
   account_id        = data.aws_caller_identity.this.account_id
   partition         = data.aws_partition.current.partition
   region            = data.aws_region.this.region
+  name              = join(local.default_separator, ["lambda", "merge", "delta"])
 
-  cdc_tables = toset(["pasx.batchrecord", "wltuser.lsvcharge"]) # needs to be changed for s3 objects from txt map
+  event_sources = {
+    for full_table_name in var.s3_objects :
+    full_table_name => {
+      table         = split(".", full_table_name)[1]
+      source_prefix = var.s3_prefixes_per_schema[split(".", full_table_name)[0]].source
+    }
+  }
+
+  source_to_target_mapping = {
+    for schema_name, prefixes in var.s3_prefixes_per_schema :
+    prefixes.source => prefixes.target
+  }
 }
 
 data "aws_caller_identity" "this" {}
@@ -82,7 +94,7 @@ resource "aws_iam_role_policy_attachment" "AWSLambdaBasicExecutionRole" {
 }
 
 resource "aws_ecr_repository" "this" {
-  name                 = join(local.default_separator, [var.prefix, var.name, "ecr", "repository"])
+  name                 = join(local.default_separator, [var.prefix, local.name, "ecr", "repository"])
   image_tag_mutability = "MUTABLE"
   force_delete         = true
 
@@ -115,26 +127,25 @@ data "aws_ecr_image" "latest" {
 }
 
 resource "aws_lambda_function" "this" {
-  publish          = true
-  description      = local.default_desc
-  function_name    = join(local.default_separator, [var.prefix, var.name])
-  memory_size      = var.lambda_memory_size
-  timeout          = var.lambda_timeout
-  role             = aws_iam_role.this.arn
-  package_type = "Image"
-  image_uri = "${aws_ecr_repository.this.repository_url}@${data.aws_ecr_image.latest.image_digest}"
+  publish       = true
+  description   = local.default_desc
+  function_name = join(local.default_separator, [var.prefix, local.name])
+  memory_size   = var.lambda_memory_size
+  timeout       = var.lambda_timeout
+  role          = aws_iam_role.this.arn
+  package_type  = "Image"
+  image_uri     = "${aws_ecr_repository.this.repository_url}@${data.aws_ecr_image.latest.image_digest}"
 
   environment {
     variables = {
-      S3_CONFIG_BUCKET                    = var.config_s3_bucket_id
-      S3_CONFIG_KEY                       = var.config_key
-      S3_SOURCE_BUCKET                    = var.source_s3_bucket_id
-      S3_SOURCE_CDC_PATH                  = var.source_cdc_path
-      S3_TARGET_BUCKET                    = var.target_s3_bucket_id
-      S3_TARGET_PATH                      = var.target_path
-      EVENT_TYPE                          = var.type_of_event
-      AUDIT_LOGS                          = var.audit_logs ? "true" : "false"
-      AUDIT_TABLE_NAME                    = var.audit_logs ? aws_dynamodb_table.merge_audit[0].name : ""
+      S3_CONFIG_BUCKET = var.config_s3_bucket_id
+      S3_CONFIG_KEY    = var.config_key
+      S3_SOURCE_BUCKET = var.source_s3_bucket_id
+      S3_TARGET_BUCKET = var.target_s3_bucket_id
+      PREFIX_MAPPING   = jsonencode(local.source_to_target_mapping)
+      AUDIT_LOGS       = var.audit_logs ? "true" : "false"
+      AUDIT_TABLE_NAME = var.audit_logs ? aws_dynamodb_table.merge_audit[0].name : ""
+      DATE_PARTITION_SUBFOLDER_COUNT = var.date_partition_subfolder_count
     }
   }
 
@@ -150,42 +161,13 @@ resource "aws_cloudwatch_log_group" "this" {
   skip_destroy      = false
 }
 
-resource "aws_lambda_permission" "s3_invoke" {
-  statement_id  = "AllowS3InvokeBootstrapLambda"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.this.function_name
-  principal     = "s3.amazonaws.com"
-  source_arn    = "arn:aws:s3:::${var.source_s3_bucket_id}"
-}
-
 resource "aws_s3_bucket_notification" "load_parquet_created" {
-  bucket = var.source_s3_bucket_id
-
-  eventbridge = var.type_of_event == "fifo"
-
-  dynamic "lambda_function" {
-    for_each = var.type_of_event == "s3" ? {
-      for v in local.cdc_tables : v => {
-        load_prefix = "${var.source_cdc_path}/${lower(element(split(".", v), 0))}/${lower(element(split(".", v), 1))}/"
-      }
-    } : {}
-
-    content {
-      lambda_function_arn = aws_lambda_function.this.arn
-      events              = ["s3:ObjectCreated:*"]
-
-      filter_prefix = lambda_function.value.load_prefix
-      filter_suffix = ".parquet"
-    }
-  }
-
-  depends_on = [aws_lambda_permission.s3_invoke]
+  bucket      = var.source_s3_bucket_id
+  eventbridge = true
 }
 
 resource "aws_sqs_queue" "this" {
-  count = var.type_of_event == "fifo" ? 1 : 0
-
-  name       = "${join(local.default_separator, [var.prefix, var.name, "fifo"])}.fifo"
+  name       = "${join(local.default_separator, [var.prefix, local.name, "fifo"])}.fifo"
   fifo_queue = true
 
   visibility_timeout_seconds = 300
@@ -195,36 +177,36 @@ resource "aws_sqs_queue" "this" {
   content_based_deduplication = true
 
   redrive_policy = jsonencode({
-    deadLetterTargetArn = aws_sqs_queue.dlq[count.index].arn
+    deadLetterTargetArn = aws_sqs_queue.dlq.arn
     maxReceiveCount     = 10
   })
 }
 
 resource "aws_sqs_queue" "dlq" {
-  count = var.type_of_event == "fifo" ? 1 : 0
-  name       = "${join(local.default_separator, [var.prefix, var.name, "dlq"])}.fifo"
-  fifo_queue = true
+  name                      = "${join(local.default_separator, [var.prefix, local.name, "dlq"])}.fifo"
+  fifo_queue                = true
+  message_retention_seconds = 86400
 }
 
 resource "aws_cloudwatch_event_rule" "cdc_parquet_created" {
-  for_each = var.type_of_event == "fifo" ? local.cdc_tables : toset([])
-  name = join(local.default_separator, [var.prefix, var.name, replace(each.key, ".", "-")])
+  for_each = local.event_sources
+  name     = join(local.default_separator, [var.prefix, local.name, replace(each.key, ".", "-")])
 
   event_pattern = jsonencode({
-    source = [ "aws.s3" ]
-    detail-type = [ "Object Created" ]
+    source      = ["aws.s3"]
+    detail-type = ["Object Created"]
     detail = {
       bucket = { name = [var.source_s3_bucket_id] }
-      object = { key = [{ wildcard = "${var.source_cdc_path}/${lower(element(split(".", each.value), 0))}/${lower(element(split(".", each.value), 1))}/*.parquet" }] }
+      object = { key = [{ wildcard = "${each.value.source_prefix}/${each.value.table}/*.parquet" }] }
     }
   })
 }
 
 resource "aws_cloudwatch_event_target" "sqs" {
-  for_each = var.type_of_event == "fifo" ? local.cdc_tables : toset([])
+  for_each = local.event_sources
 
   rule = aws_cloudwatch_event_rule.cdc_parquet_created[each.key].name
-  arn  = aws_sqs_queue.this[0].arn
+  arn  = aws_sqs_queue.this.arn
 
   sqs_target {
     message_group_id = each.key
@@ -232,7 +214,6 @@ resource "aws_cloudwatch_event_target" "sqs" {
 }
 
 data "aws_iam_policy_document" "sqs_eventbridge" {
-  count = var.type_of_event == "fifo" ? 1 : 0
   statement {
     effect = "Allow"
 
@@ -246,7 +227,7 @@ data "aws_iam_policy_document" "sqs_eventbridge" {
     ]
 
     resources = [
-      aws_sqs_queue.this[0].arn
+      aws_sqs_queue.this.arn
     ]
 
     condition {
@@ -262,35 +243,32 @@ data "aws_iam_policy_document" "sqs_eventbridge" {
 }
 
 resource "aws_sqs_queue_policy" "eventbridge" {
-  count = var.type_of_event == "fifo" ? 1 : 0
-
-  queue_url = aws_sqs_queue.this[0].id
-  policy    = data.aws_iam_policy_document.sqs_eventbridge[0].json
+  queue_url = aws_sqs_queue.this.id
+  policy    = data.aws_iam_policy_document.sqs_eventbridge.json
 }
 
 resource "aws_lambda_event_source_mapping" "sqs" {
-  count = var.type_of_event == "fifo" ? 1 : 0
-
-  event_source_arn = aws_sqs_queue.this[0].arn
+  event_source_arn = aws_sqs_queue.this.arn
   function_name    = aws_lambda_function.this.arn
 
   batch_size = 1
   enabled    = true
 
   depends_on = [
-    aws_iam_role_policy_attachment.this
+    aws_iam_role_policy_attachment.this,
+    aws_sqs_queue_policy.eventbridge
   ]
 }
 
 resource "aws_dynamodb_table" "merge_audit" {
-  count = var.audit_logs ? 1 : 0
-  name         = join(local.default_separator, [var.prefix, var.name, "audit", "table"])
+  count        = var.audit_logs ? 1 : 0
+  name         = join(local.default_separator, [var.prefix, local.name, "audit", "table"])
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "file_id"
-  
-  attribute { 
-    name = "file_id" 
-    type = "S" 
+
+  attribute {
+    name = "file_id"
+    type = "S"
   }
 
   ttl {

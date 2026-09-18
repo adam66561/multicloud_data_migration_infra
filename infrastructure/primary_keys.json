@@ -1,9 +1,9 @@
 {
-    "wltuser.lsvcharge": [
-        "materialnr",
-        "chargenr"
+    "schema_target1.table1": [
+        "id1",
+        "id2"
     ],
-    "pasx.batchrecord": [
-        "entitykey"
+    "schema_target2.table2": [
+        "id3"
     ]
 }

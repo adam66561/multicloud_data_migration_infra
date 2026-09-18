@@ -1,0 +1,37 @@
+AB#25650 added lambda_merge_delta module to merge cdc delta files to initial data
+- The Lambda processes DMS CDC Parquet files from S3 and applies them to per-table Delta Lake targets on S3
+- Validates the source bucket and .parquet object key.
+- Extracts <schema>/<table> from the configured CDC prefix.
+- Loads the configured primary keys.
+- Reads and validates the CDC Parquet file.
+- Collapses multiple events for the same primary key into one final state while preserving the source-file event order.
+- Executes a Delta MERGE with retry and jitter for transient concurrent-write failures.
+- Optionally records merge metrics in an append-only audit log.
+- The merge applies insert I, update U, and delete D events only when the incoming optime is not older than the target row. Updates retain target values for source columns that are null, allowing partial CDC update payloads.
+- Two possible ways to invoke the Lambda: (1) via S3 event notification on the source bucket, or (2) via S3 event to fifo queue with retry, deduplication, and dead-letter queue and order keeping per table (message id)- between different tables, concurrency is allowed. 
+- Delta rs Dynamodb locking table is not needed after version 1.0.0 so it was removed, now it uses S3 locking provider, but only one writer per table exist thank to FIFO (not in S3 event direct)
+- Lambda works with schema evolution - 
+    - If the source table has new columns, the Lambda will add them to the target Delta table.
+    - If the source table has removed columns, the Lambda will ignore them and keep the existing columns in the target Delta table.
+    - Column type changes are not supported and will result in an error. The Lambda will log the error and skip the merge for that table.
+    - Column name change are like adding new column and removing old column, so the Lambda will add the new column and keep the existing columns in the target Delta table.
+- Validation, deduplication and idempotency:
+    - FIFO deduplicates the same S3 event notification for the same object key, which can occur when multiple S3 events are generated for the same object.
+    - The Lambda is idempotent with merge logic only for newer optime and can be retried for the same S3 object
+    - Audit table informs the user of the merge result and any errors, including the source S3 object key and optime. Can be used to check if every source S3 object has been processed successfully.
+    - Lambda does not cast anything inside, it takes as it was written by DMS
+    - Lambda checks if there is needed columns such as primary keys, optime, op which are required for the merge
+    - Lambda works only if target Delta table exists - if not, it returns to fifo and retries later. Order is kept. If 10 failures, the message is sent to dead-letter queue for manual intervention. Then order could be broke - need for reload
+    - Even if cdc parquet file has multiple rows for single primary key, the Lambda will collapse them into one final state based on the optime and op. The final state will be applied to the target Delta table. There will be only one merge for every operation so only one new version so its a transaction - all or nothing from this file so its easier to track
+    - Merge has retry logic and Fifo has retry logic but all is idempotent in case of double events appearance
+- DynamoDB audit table is optional
+- Module allows to specify subpaths in S3 to full load target (or copy of it) and for cdc
+- Works only for tables that have a primary key defined. The primary key is used to collapse multiple events for the same row into one final state and to perform the Delta MERGE. 
+If a table does not have a primary key, the Lambda will log an error and skip the merge for that table but it lambda can be adjusted in future to support non-primary key tables by using a different merge strategy, such as upsert based on a unique combination of columns or a timestamp-based approach or just insert only.
+- Lambda is packaged as container image and can be deployed to AWS Lambda or any other container runtime. The container image is built using a Makefile and Dockerfile, which install the required dependencies and copy the source code into the image. The image is then pushed to an Amazon ECR repository, which can be used to deploy the Lambda function with LATEST code image.
+- Lambda needs aws_lambda_powertools deltalake boto3 pandas pyarrow libraries
+- Everything is modularized, so if there is need to recreate solution for different site, its copy paste adjust matter
+- DMS endpoint setting for parquet timestamp needs to be setted to hold ms info
+- Issues of current solution and next steps:
+    - Unable to distinguish if source columns were not changed (DMS writes as NULL) or it was intentional explicit change to null - now the first option is assumed
+    - Every merge can rewrite data files, there will be need for maintentance job or reload for example in the night
