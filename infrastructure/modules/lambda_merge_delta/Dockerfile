@@ -9,7 +9,12 @@ RUN dnf install -y findutils && \
 RUN pip3 install --upgrade pip && \
     pip3 install -r requirements.txt --target "${LAMBDA_TASK_ROOT}"
 
+COPY infrastructure/modules/lambda_merge_delta/src/audit.py ${LAMBDA_TASK_ROOT}
+COPY infrastructure/modules/lambda_merge_delta/src/cdc.py ${LAMBDA_TASK_ROOT}
+COPY infrastructure/modules/lambda_merge_delta/src/config.py ${LAMBDA_TASK_ROOT}
+COPY infrastructure/modules/lambda_merge_delta/src/delta_merge.py ${LAMBDA_TASK_ROOT}
 COPY infrastructure/modules/lambda_merge_delta/src/lambda_function.py ${LAMBDA_TASK_ROOT}
+COPY infrastructure/modules/lambda_merge_delta/src/s3_io.py ${LAMBDA_TASK_ROOT}
 
 RUN chmod 644 $(find . -type f) && chmod 755 $(find . -type d)
 
