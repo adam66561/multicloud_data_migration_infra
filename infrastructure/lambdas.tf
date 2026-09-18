@@ -9,7 +9,7 @@ module "lambda_convert_delta" {
   source = "./modules/lambda_convert_delta"
   prefix = join(local.default_separator, [local.prefix, "lambda", "convert", "delta"])
 
-  glue_database_name = ["schema1"]
+  glue_database_name = ["pasx"]
   glue_catalog_id    = data.aws_caller_identity.current.account_id
 
   destination_s3_bucket_id  = module.lambda_tests.s3_bucket_id

@@ -215,7 +215,6 @@ def lambda_handler(event, context):
         "quantity": 1,
         "newcol": "new_value_1",
         "newcol2": "new_value_2",
-        "newcol3": "new_value_3"
         }
       ]
     }
