@@ -4,8 +4,8 @@ from __future__ import annotations
 import logging
 import random
 import time
+from typing import Any
 
-import pandas as pd
 import pyarrow as pa
 from deltalake import DeltaTable
 
@@ -29,10 +29,10 @@ def delta_table_exists(path: str) -> bool:
     return DeltaTable.is_deltatable(path)
 
 def merge_once(
-        df: pd.DataFrame, 
+        table: pa.Table,
         target_path: str,
         pk_cols: list[str]
-    ) -> None:
+    ) -> dict[str, Any]:
 
     dt = DeltaTable(target_path)
 
@@ -43,8 +43,6 @@ def merge_once(
     ]
     )
 
-    source_table = pa.Table.from_pandas(df, preserve_index=False,)
-
     target_columns = {
         field.name
         for field in dt.schema().fields
@@ -52,13 +50,13 @@ def merge_once(
 
     new_columns = [
         column
-        for column in df.columns
+        for column in table.column_names
         if column not in target_columns
     ]
 
     logger.info(
         f"Starting merge for {target_path}; "
-        f"rows={len(df)}; "
+        f"rows={table.num_rows}; "
         f"pk_cols={pk_cols}; "
         f"new_columns={new_columns}; "
         f"predicate={merge_predicate}"
@@ -70,18 +68,24 @@ def merge_once(
             if column in target_columns
             else f"source.`{column}`"
         )
-        for column in df.columns
+        for column in table.column_names
+        if column not in pk_cols
+    }
+
+    replace_map = {
+        column: f"source.`{column}`"
+        for column in table.column_names
         if column not in pk_cols
     }
 
     insert_map = {
         column: f"source.`{column}`"
-        for column in df.columns
+        for column in table.column_names
     }
 
     metrics = (
         dt.merge(
-            source=source_table,
+            source=table,
             predicate=merge_predicate,
             source_alias="source",
             target_alias="target",
@@ -92,7 +96,12 @@ def merge_once(
             "AND source.optime >= target.optime")
         )
         .when_matched_update(predicate=(
-            "source.op IN ('I', 'U') "
+            "source.op = 'I' "
+            "AND source.optime >= target.optime"),
+            updates=replace_map
+        )        
+        .when_matched_update(predicate=(
+            "source.op = 'U' "
             "AND source.optime >= target.optime"),
             updates=update_map
         )
@@ -107,15 +116,15 @@ def merge_once(
 
 
 def merge_with_retry(
-    df: pd.DataFrame,
+    table: pa.Table,
     target_path: str,
     pk_cols: list[str],
     max_attempts: int = 3,
-):
+) -> tuple[dict[str, Any], int]:
     for attempt in range(1, max_attempts + 1):
         try:
             metrics = merge_once(
-                df=df,
+                table=table,
                 target_path=target_path,
                 pk_cols=pk_cols,
             )

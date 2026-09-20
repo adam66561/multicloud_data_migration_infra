@@ -1,9 +1,31 @@
 # test_lambda_success.py
 
 import sys
-import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
 from deltalake import DeltaTable
+from datetime import date, datetime
+from decimal import Decimal
 
+def get_row(table: pa.Table, **conditions):
+    mask = None
+
+    for column, value in conditions.items():
+        condition = pc.equal(
+            table[column],
+            pa.scalar(value, type=table[column].type),
+        )
+
+        mask = condition if mask is None else pc.and_(mask, condition)
+
+    filtered = table.filter(mask)
+
+    assert filtered.num_rows == 1
+
+    return {
+        column: filtered[column][0].as_py()
+        for column in filtered.column_names
+    }
 
 def test_insert_and_update(
     monkeypatch,
@@ -56,19 +78,17 @@ def test_insert_and_update(
 
     dt = DeltaTable(str(delta_path))
 
-    result_df = (dt.to_pandas().sort_values(["id1", "id2"]).reset_index(drop=True))
+    result_dt = DeltaTable(str(delta_path)).to_pyarrow_table()
 
-    assert len(result_df) == 2
+    assert len(result_dt) == 2
 
-
-    mat001 = result_df[result_df["id1"] == "MAT001"].iloc[0]
-
+    mat001 = get_row(result_dt, id1="MAT001")
     assert mat001["quantity"] == 20
     assert mat001["op"] == "U"
     assert mat001["optime"] == "2026-09-18T10:01:00"
 
 
-    mat002 = result_df[result_df["id1"] == "MAT002"].iloc[0]
+    mat002 = get_row(result_dt, id1="MAT002")
     assert mat002["quantity"] == 30
     assert mat002["op"] == "I"
 
@@ -132,9 +152,15 @@ def test_insert_and_delete(
     assert result == {"statusCode": 200, "processed": 1}
 
     dt = DeltaTable(str(delta_path))
-    result_df = (dt.to_pandas().sort_values(["id1", "id2"]).reset_index(drop=True))
-    assert not (result_df["id1"] == "MAT001").any()
-    assert (result_df["id1"] == "MAT002").any()
+    result_dt = dt.to_pyarrow_table()
+
+    assert pc.sum(
+        pc.equal(result_dt["id1"], "MAT001")
+    ).as_py() == 0
+
+    assert pc.sum(
+        pc.equal(result_dt["id1"], "MAT002")
+    ).as_py() == 1
 
     response = mocked_aws["audit_table"].scan()
     audit = response["Items"][0]
@@ -196,11 +222,23 @@ def test_multiple_composite_primary_keys(
     result = run_lambda(event, delta_path)
     assert result == {"statusCode": 200, "processed": 1}
 
-    result_df = (DeltaTable(str(delta_path)).to_pandas().sort_values("id2").reset_index(drop=True))
-    assert len(result_df) == 2
+    dt = DeltaTable(str(delta_path))
+    result_dt = dt.to_pyarrow_table()
 
-    pk_001 = result_df[result_df["id2"] == "001"].iloc[0]
-    pk_002 = result_df[result_df["id2"] == "002"].iloc[0]
+    assert result_dt.num_rows == 2
+
+    pk_001 = get_row(
+        result_dt,
+        id1="MAT001",
+        id2="001",
+    )
+
+    pk_002 = get_row(
+        result_dt,
+        id1="MAT001",
+        id2="002",
+    )
+
     assert pk_001["quantity"] == 150
     assert pk_002["quantity"] == 200
 
@@ -235,7 +273,6 @@ def test_schema_evolution_adds_new_column(
         {
             "id1": "MAT001",
             "id2": "001",
-            "quantity": 100,
             "op": "U",
             "optime": "2026-09-18T10:00:00",
             "new_column": "new_value_1",
@@ -243,10 +280,9 @@ def test_schema_evolution_adds_new_column(
         {
             "id1": "MAT001",
             "id2": "002",
-            "quantity": 200,
             "op": "U",
             "optime": "2026-09-18T10:00:00",
-            "new_column2": "new_value_2",
+            "new_column": "new_value_2",
         },
     ])
 
@@ -255,15 +291,26 @@ def test_schema_evolution_adds_new_column(
     result = run_lambda(event, delta_path)
     assert result == {"statusCode": 200, "processed": 1}
 
-    result_df = (DeltaTable(str(delta_path)).to_pandas().sort_values("id2").reset_index(drop=True))
-    assert len(result_df) == 2
+    dt = DeltaTable(str(delta_path))
+    result_dt = dt.to_pyarrow_table()
+    assert result_dt.num_rows == 2
 
-    pk_001 = result_df[result_df["id2"] == "001"].iloc[0]
-    pk_002 = result_df[result_df["id2"] == "002"].iloc[0]
+    pk_001 = get_row(
+        result_dt,
+        id1="MAT001",
+        id2="001",
+    )
+
+    pk_002 = get_row(
+        result_dt,
+        id1="MAT001",
+        id2="002",
+    )
+
     assert pk_001["new_column"] == "new_value_1"
-    assert pd.isna(pk_001["new_column2"])
-    assert pk_002["new_column2"] == "new_value_2"
-    assert pd.isna(pk_002["new_column"])
+    assert pk_001["quantity"] == 10
+    assert pk_002["new_column"] == "new_value_2"
+    assert pk_002["quantity"] == 20
 
 
 def test_rows_after_delete_do_no_inherit_deleted_values(
@@ -280,6 +327,7 @@ def test_rows_after_delete_do_no_inherit_deleted_values(
             "id1": "MAT001",
             "id2": "001",
             "quantity": 10,
+            "quantity2": 40,
             "op": "I",
             "optime": "2026-09-18T09:00:00",
         }
@@ -290,6 +338,7 @@ def test_rows_after_delete_do_no_inherit_deleted_values(
             "id1": "MAT001",
             "id2": "001",
             "quantity": None,
+            "quantity2": None,
             "op": "D",
             "optime": "2026-09-18T10:00:00",
         },
@@ -297,9 +346,9 @@ def test_rows_after_delete_do_no_inherit_deleted_values(
             "id1": "MAT001",
             "id2": "001",
             "quantity": 200,
+            "quantity2": None,
             "op": "I",
             "optime": "2026-09-18T10:00:00",
-            "new_column": "new_value_2",
         },
     ])
 
@@ -308,12 +357,18 @@ def test_rows_after_delete_do_no_inherit_deleted_values(
     result = run_lambda(event, delta_path)
     assert result == {"statusCode": 200, "processed": 1}
 
-    result_df = (DeltaTable(str(delta_path)).to_pandas().sort_values("id2").reset_index(drop=True))
-    assert len(result_df) == 1
+    dt = DeltaTable(str(delta_path))
+    result_dt = dt.to_pyarrow_table()
+    assert result_dt.num_rows == 1
 
-    pk_001 = result_df[result_df["id2"] == "001"].iloc[0]
-    assert pk_001["new_column"] == "new_value_2"
+    pk_001 = get_row(
+        result_dt,
+        id1="MAT001",
+        id2="001",
+    )
+
     assert pk_001["quantity"] == 200
+    assert pk_001["quantity2"] is None 
 
 
 def test_optime_must_be_greater_than_existing(
@@ -350,10 +405,10 @@ def test_optime_must_be_greater_than_existing(
     result = run_lambda(event, delta_path)
     assert result == {"statusCode": 200, "processed": 1}
 
-    result_df = (DeltaTable(str(delta_path)).to_pandas().sort_values("id2").reset_index(drop=True))
-    assert len(result_df) == 1
+    result_dt = (DeltaTable(str(delta_path)).to_pandas().sort_values("id2").reset_index(drop=True))
+    assert len(result_dt) == 1
 
-    pk_001 = result_df[result_df["id2"] == "001"].iloc[0]
+    pk_001 = result_dt[result_dt["id2"] == "001"].iloc[0]
     assert pk_001["optime"] == "2026-09-18T10:00:00"
     assert pk_001["quantity"] == 10
 
@@ -396,10 +451,13 @@ def test_only_not_null_values(
     result = run_lambda(event, delta_path)
     assert result == {"statusCode": 200, "processed": 1}
 
-    result_df = (DeltaTable(str(delta_path)).to_pandas().sort_values("id2").reset_index(drop=True))
-    assert len(result_df) == 1
+    result_dt = (DeltaTable(str(delta_path)).to_pandas().sort_values("id2").reset_index(drop=True))
+    assert len(result_dt) == 1
 
-    pk_001 = result_df[result_df["id2"] == "001"].iloc[0]
+    pk_001 = result_dt[result_dt["id2"] == "001"].iloc[0]
     assert pk_001["quantity"] == 20
     assert pk_001["col1"] == "col1_value"
     assert pk_001["col2"] == "col2_value_updated"
+
+
+

@@ -3,8 +3,8 @@ import json
 from io import BytesIO
 
 import boto3
-import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from deltalake import write_deltalake
@@ -84,12 +84,10 @@ def create_delta_table(tmp_path):
     def _create(rows):
         delta_path = tmp_path / "delta"
 
-        df = pd.DataFrame(rows)
-
-        arrow_table = pa.Table.from_pandas(
-            df,
-            preserve_index=False,
-        )
+        if isinstance(rows, pa.Table):
+            arrow_table = rows
+        else:
+            arrow_table = pa.Table.from_pylist(rows)
 
         write_deltalake(str(delta_path), arrow_table, mode="overwrite")
         return delta_path
@@ -98,12 +96,14 @@ def create_delta_table(tmp_path):
 @pytest.fixture
 def upload_parquet(mocked_aws):
     def _upload(rows):
-        df = pd.DataFrame(rows)
+        if isinstance(rows, pa.Table):
+            arrow_table = rows
+        else:
+            arrow_table = pa.Table.from_pylist(rows)
 
         buffer = BytesIO()
 
-        df.to_parquet(buffer, engine="pyarrow", index=False)
-
+        pq.write_table(arrow_table, buffer)
         key = ("schema1/table1/2026/09/18/0001.parquet")
 
         mocked_aws["s3"].put_object(Bucket="source-bucket", Key=key, Body=buffer.getvalue())

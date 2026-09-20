@@ -1,7 +1,7 @@
 # test_lambda_failure.py
 
 import sys
-import pandas as pd
+import pyarrow as pa
 from deltalake import DeltaTable
 import pytest
 
@@ -34,17 +34,14 @@ def test_missing_primary_key_column_fails_without_modifying_delta(
 
     event = create_lambda_event(key)
 
-    before_df = DeltaTable(str(delta_path)).to_pandas()
+    before = DeltaTable(str(delta_path)).to_pyarrow_table()
 
     with pytest.raises(RuntimeError, match="Missing required columns"):
         run_lambda(event, delta_path)
 
-    after_df = DeltaTable(str(delta_path)).to_pandas()
+    after = DeltaTable(str(delta_path)).to_pyarrow_table()
 
-    pd.testing.assert_frame_equal(
-        before_df.sort_index(axis=1),
-        after_df.sort_index(axis=1),
-    )
+    assert before.equals(after)
 
     response = mocked_aws["audit_table"].scan()
     assert response["Count"] == 0
@@ -78,8 +75,17 @@ def test_unsupported_operation_fails_without_modifying_delta(
 
     event = create_lambda_event(key)
 
+    before = DeltaTable(str(delta_path)).to_pyarrow_table()
+
     with pytest.raises(RuntimeError, match="Unsupported operations found"):
         run_lambda(event, delta_path)
+
+    after = DeltaTable(str(delta_path)).to_pyarrow_table()
+
+    assert before.equals(after)
+
+    response = mocked_aws["audit_table"].scan()
+    assert response["Count"] == 0
 
 
 def test_missing_delta_table_fails(
@@ -129,15 +135,15 @@ def test_missing_s3_object_is_skipped(
 
     event = create_lambda_event(missing_key)
 
-    before_df = DeltaTable(str(delta_path)).to_pandas().sort_values(["id1", "id2"]).reset_index(drop=True)
+    before = DeltaTable(str(delta_path)).to_pyarrow_table()
 
     result = run_lambda(event, delta_path)
 
     assert result == {"statusCode": 200, "processed": 1}
 
-    after_df = (DeltaTable(str(delta_path)).to_pandas().sort_values(["id1", "id2"]).reset_index(drop=True))
+    after = DeltaTable(str(delta_path)).to_pyarrow_table()
 
-    pd.testing.assert_frame_equal(before_df, after_df)
+    assert before.equals(after)
 
     response = mocked_aws["audit_table"].scan()
     assert response["Count"] == 0
@@ -160,7 +166,7 @@ def test_incompatible_delta_schema_fails_without_modifying_table(
         }
     ])
 
-    before_df = DeltaTable(str(delta_path)).to_pandas().sort_values(["id1", "id2"]).reset_index(drop=True)
+    before = DeltaTable(str(delta_path)).to_pyarrow_table()
 
     key = upload_parquet([
         {
@@ -177,9 +183,9 @@ def test_incompatible_delta_schema_fails_without_modifying_table(
     with pytest.raises(Exception):
         run_lambda(event, delta_path)
 
-    after_df = DeltaTable(str(delta_path)).to_pandas().sort_values(["id1", "id2"]).reset_index(drop=True)
+    after = DeltaTable(str(delta_path)).to_pyarrow_table()
 
-    pd.testing.assert_frame_equal(before_df, after_df)
+    assert before.equals(after)
 
     response = mocked_aws["audit_table"].scan()
     assert response["Count"] == 0

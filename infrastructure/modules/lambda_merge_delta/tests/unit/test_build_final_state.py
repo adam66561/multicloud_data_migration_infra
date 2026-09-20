@@ -1,216 +1,255 @@
 # test_build_final_state.py
 
-import pandas as pd
-import pandas.testing as pdt
+import pyarrow as pa
 import pytest
 import sys
 sys.path.insert(0, "../../src")
 from cdc import build_final_state
 
 def test_returns_last_event_per_primary_key_and_preserves_group_order():
-    df = pd.DataFrame(
-        [
-            {"id": 2, "op": "I", "name": "second"},
-            {"id": 1, "op": "I", "name": "first"},
-            {"id": 2, "op": "U", "name": "second updated"},
-        ]
+    table = pa.table(
+        {
+            "id": [2, 1, 2],
+            "op": ["I", "I", "U"],
+            "name": ["second", "first", "second updated"],
+        }
     )
 
-    actual = build_final_state(df, pk_cols=["id"])
+    actual, num_rows = build_final_state(table, pk_cols=["id"])
 
-    expected = pd.DataFrame(
-        [
-            {"id": 2, "op": "U", "name": "second updated"},
-            {"id": 1, "op": "I", "name": "first"},
-        ]
+    expected = pa.table(
+        {
+            "id": [2, 1],
+            "op": ["U", "I"],
+            "name": ["second updated", "first"],
+        }
     )
 
-    pdt.assert_frame_equal(actual, expected)
+    assert actual.equals(expected)
+    assert num_rows == 2
 
 
 def test_update_merges_latest_non_null_value_for_each_payload_column():
-    df = pd.DataFrame(
-        [
-            {
-                "id": 101,
-                "op": "I",
-                "name": "Ada",
-                "email": "ada@example.com",
-                "status": "active",
-            },
-            {
-                "id": 101,
-                "op": "U",
-                "name": None,
-                "email": "ada.lovelace@example.com",
-                "status": None,
-            },
-            {
-                "id": 101,
-                "op": "U",
-                "name": "Ada Lovelace",
-                "email": None,
-                "status": "verified",
-            },
-        ]
+    table = pa.table(
+        {
+            "id": [101, 101, 101],
+            "op": ["I", "U", "U"],
+            "name": [
+                "Ada",
+                None,
+                "Ada Lovelace",
+            ],
+            "email": [
+                "ada@example.com",
+                "ada.lovelace@example.com",
+                None,
+            ],
+            "status": [
+                "active",
+                None,
+                "verified",
+            ],
+        }
     )
 
-    actual = build_final_state(df, pk_cols=["id"])
+    actual, num_rows = build_final_state(table, pk_cols=["id"])
 
-    expected = pd.DataFrame(
-        [
-            {
-                "id": 101,
-                "op": "U",
-                "name": "Ada Lovelace",
-                "email": "ada.lovelace@example.com",
-                "status": "verified",
-            }
-        ]
+    expected = pa.table(
+        {
+            "id": [101],
+            "op": ["U"],
+            "name": ["Ada Lovelace"],
+            "email": ["ada.lovelace@example.com"],
+            "status": ["verified"],
+        }
     )
 
-    pdt.assert_frame_equal(actual, expected)
+    assert actual.equals(expected)
+    assert num_rows == 1
 
 
 def test_non_null_value_from_initial_insert_is_retained_when_update_is_null():
-    df = pd.DataFrame(
-        [
-            {"id": 1, "op": "I", "account_type": "premium", "score": 10.0},
-            {"id": 1, "op": "U", "account_type": None, "score": None},
-        ]
+    table = pa.table(
+        {
+            "id": [1, 1],
+            "op": ["I", "U"],
+            "account_type": ["premium", None],
+            "score": pa.array(
+                [10.0, None],
+                type=pa.float64(),
+            ),
+        }
     )
 
-    actual = build_final_state(df, pk_cols=["id"])
+    actual, num_rows = build_final_state(table, pk_cols=["id"])
 
-    expected = pd.DataFrame(
-        [{"id": 1, "op": "U", "account_type": "premium", "score": 10.0}]
+    expected = pa.table(
+        {
+            "id": [1],
+            "op": ["U"],
+            "account_type": ["premium"],
+            "score": pa.array(
+                [10.0],
+                type=pa.float64(),
+            ),
+        }
     )
 
-    pdt.assert_frame_equal(actual, expected)
+    assert actual.equals(expected)
+    assert num_rows == 1
 
 
 def test_explicit_delete_uses_last_row_without_backfilling_payload_columns():
-    df = pd.DataFrame(
-        [
-            {"id": 7, "op": "I", "name": "to be deleted", "region": "eu"},
-            {"id": 7, "op": "U", "name": "renamed", "region": None},
-            {"id": 7, "op": "D", "name": None, "region": None},
-        ]
+    table = pa.table(
+        {
+            "id": [7, 7, 7],
+            "op": ["I", "U", "D"],
+            "name": [
+                "to be deleted",
+                "renamed",
+                None,
+            ],
+            "region": [
+                "eu",
+                None,
+                None,
+            ],
+        }
     )
 
-    actual = build_final_state(df, pk_cols=["id"])
+    actual, num_rows = build_final_state(table, pk_cols=["id"])
 
-    expected = df.iloc[[-1]].reset_index(drop=True)
+    expected = table.slice(2, 1)
 
-    pdt.assert_frame_equal(actual, expected)
+    assert actual.equals(expected)
+    assert num_rows == 1
 
 
 def test_delete_followed_by_reinsert_returns_reinserted_state():
-    df = pd.DataFrame(
-        [
-            {"id": 7, "op": "I", "name": "old value", "amount": 1},
-            {"id": 7, "op": "D", "name": None, "amount": None},
-            {"id": 7, "op": "I", "name": "new value", "amount": 2},
-        ]
-    )
-
-    actual = build_final_state(df, pk_cols=["id"])
-
-    expected = pd.DataFrame(
-        [{"id": 7, "op": "I", "name": "new value", "amount": 2}]
-    )
-
-    pdt.assert_frame_equal(actual, expected, check_dtype=False)
-
-
-def test_build_final_state_preserves_input_dtypes():
-    df = pd.DataFrame(
+    table = pa.table(
         {
-            "id": pd.Series([7, 7, 7], dtype="Int64"),
-            "op": pd.Series(["I", "D", "I"], dtype="string"),
-            "name": pd.Series(
-                ["old value", pd.NA, "new value"],
-                dtype="string",
+            "id": [7, 7, 7],
+            "op": ["I", "D", "I"],
+            "name": [
+                "old value",
+                None,
+                "new value",
+            ],
+            "amount": pa.array(
+                [1, None, None],
+                type=pa.int64(),
             ),
-            "amount": pd.Series([1, pd.NA, 2], dtype="Int64"),
         }
     )
 
-    actual = build_final_state(df, pk_cols=["id"])
+    actual, num_rows = build_final_state(table, pk_cols=["id"])
 
-    expected = pd.DataFrame(
+    expected = pa.table(
         {
-            "id": pd.Series([7], dtype="Int64"),
-            "op": pd.Series(["I"], dtype="string"),
-            "name": pd.Series(["new value"], dtype="string"),
-            "amount": pd.Series([2], dtype="Int64"),
+            "id": [7],
+            "op": ["I"],
+            "name": ["new value"],
+            "amount": pa.array(
+                [None],
+                type=pa.int64(),
+            ),
         }
     )
 
-    pdt.assert_frame_equal(actual, expected)
-
-    pdt.assert_series_equal(actual.dtypes, df.dtypes)
+    assert actual.equals(expected)
+    assert num_rows == 1
 
 
 def test_all_null_payload_values_remain_none_for_non_delete_event():
-    df = pd.DataFrame(
-        [
-            {"id": 9, "op": "I", "name": None, "amount": None},
-            {"id": 9, "op": "U", "name": None, "amount": None},
-        ]
+    table = pa.table(
+        {
+            "id": [9, 9],
+            "op": ["I", "U"],
+            "name": pa.array(
+                [None, None],
+                type=pa.string(),
+            ),
+            "amount": pa.array(
+                [None, None],
+                type=pa.int64(),
+            ),
+        }
     )
 
-    actual = build_final_state(df, pk_cols=["id"])
+    actual, num_rows = build_final_state(table, pk_cols=["id"])
 
-    expected = pd.DataFrame(
-        [{"id": 9, "op": "U", "name": pd.NA, "amount": pd.NA}]
+    expected = pa.table(
+        {
+            "id": [9],
+            "op": ["U"],
+            "name": pa.array(
+                [None],
+                type=pa.string(),
+            ),
+            "amount": pa.array(
+                [None],
+                type=pa.int64(),
+            ),
+        }
     )
 
-    pdt.assert_frame_equal(actual, expected, check_dtype=False)
+    assert actual.equals(expected)
+    assert num_rows == 1
 
 def test_supports_composite_primary_keys():
-    df = pd.DataFrame(
-        [
-            {"tenant_id": "a", "order_id": 1, "op": "I", "quantity": 1},
-            {"tenant_id": "a", "order_id": 2, "op": "I", "quantity": 2},
-            {"tenant_id": "a", "order_id": 1, "op": "U", "quantity": 3},
-            {"tenant_id": "b", "order_id": 1, "op": "I", "quantity": 4},
-        ]
+    table = pa.table(
+        {
+            "tenant_id": ["a", "a", "a", "b"],
+            "order_id": [1, 2, 1, 1],
+            "op": ["I", "I", "U", "I"],
+            "quantity": [1, 2, 3, 4],
+        }
     )
 
-    actual = build_final_state(
-        df,
+    actual, num_rows = build_final_state(
+        table,
         pk_cols=["tenant_id", "order_id"],
     )
 
-    expected = pd.DataFrame(
-        [
-            {"tenant_id": "a", "order_id": 1, "op": "U", "quantity": 3},
-            {"tenant_id": "a", "order_id": 2, "op": "I", "quantity": 2},
-            {"tenant_id": "b", "order_id": 1, "op": "I", "quantity": 4},
-        ]
+    expected = pa.table(
+        {
+            "tenant_id": ["a", "a", "b"],
+            "order_id": [1, 2, 1],
+            "op": ["U", "I", "I"],
+            "quantity": [3, 2, 4],
+        }
     )
 
-    pdt.assert_frame_equal(actual, expected)
+    assert actual.equals(expected)
+    assert num_rows == 3
 
-def test_does_not_mutate_the_input_dataframe():
-    df = pd.DataFrame(
-        [
-            {"id": 1, "op": "I", "name": "before"},
-            {"id": 1, "op": "U", "name": None},
-        ]
+def test_does_not_mutate_the_input_table():
+    table = pa.table(
+        {
+            "id": [1, 1],
+            "op": ["I", "U"],
+            "name": ["before", None],
+        }
     )
-    original = df.copy(deep=True)
 
-    build_final_state(df, pk_cols=["id"])
+    original = table
 
-    pdt.assert_frame_equal(df, original)
+    build_final_state(table, pk_cols=["id"])
+
+    assert table.equals(original)
 
 
-def test_empty_input_returns_an_empty_dataframe():
-    df = pd.DataFrame(columns=["id", "op", "name"])
+def test_empty_input_returns_an_empty_table():
+    table = pa.table(
+        {
+            "id": pa.array([], type=pa.int64()),
+            "op": pa.array([], type=pa.string()),
+            "name": pa.array([], type=pa.string()),
+        }
+    )
 
-    actual = build_final_state(df, pk_cols=["id"])
+    actual, num_rows = build_final_state(table, pk_cols=["id"])
 
-    assert actual.empty
-    assert list(actual.columns) == ["id", "op", "name"]
+    assert num_rows == 0
+    assert actual.column_names == ["id", "op", "name"]
+    assert actual.schema == table.schema

@@ -1,4 +1,4 @@
-AB#25650 added lambda_merge_delta module to merge cdc delta files to initial data
+
 - The Lambda processes DMS CDC Parquet files from S3 and applies them to per-table Delta Lake targets on S3
 - Validates the source bucket and .parquet object key.
 - Extracts <schema>/<table> from the configured CDC prefix.
@@ -8,7 +8,7 @@ AB#25650 added lambda_merge_delta module to merge cdc delta files to initial dat
 - Executes a Delta MERGE with retry and jitter for transient concurrent-write failures.
 - Optionally records merge metrics in an append-only audit log.
 - The merge applies insert I, update U, and delete D events only when the incoming optime is not older than the target row. Updates retain target values for source columns that are null, allowing partial CDC update payloads.
-- Two possible ways to invoke the Lambda: (1) via S3 event notification on the source bucket, or (2) via S3 event to fifo queue with retry, deduplication, and dead-letter queue and order keeping per table (message id)- between different tables, concurrency is allowed. 
+- To invoke the Lambda: via S3 event to fifo queue with retry, deduplication, and dead-letter queue and order keeping per table (message id)- between different tables, concurrency is allowed. 
 - Delta rs Dynamodb locking table is not needed after version 1.0.0 so it was removed, now it uses S3 locking provider, but only one writer per table exist thank to FIFO (not in S3 event direct)
 - Lambda works with schema evolution - 
     - If the source table has new columns, the Lambda will add them to the target Delta table.
@@ -34,4 +34,12 @@ If a table does not have a primary key, the Lambda will log an error and skip th
 - DMS endpoint setting for parquet timestamp needs to be setted to hold ms info
 - Issues of current solution and next steps:
     - Unable to distinguish if source columns were not changed (DMS writes as NULL) or it was intentional explicit change to null - now the first option is assumed
-    - Every merge can rewrite data files, there will be need for maintentance job or reload for example in the night
+    - optimizer
+- Datype coverage
+    - Decimal256 is not supported, will work only for Decimal32 Decimal64 Decimal128 so max precision,scale is 38,38
+    - Time32 is not supported, conversion should be made in DMS transformations
+    - timestamp in ns are not supported, us is maximum precision, s and ms are autoconverted to us
+    - timezones are kept
+    - rest of datatypes
+        - Pandas dependency was removed in order to minimize number of transformation between different formats. Parquet is Pyarrow fully compatible and so is Delta. Pandas not.
+        - so rest of datatypes should work properly, details in tests/checks/datatype_coverage.py and tests/integration/test_datatype_coverage.py

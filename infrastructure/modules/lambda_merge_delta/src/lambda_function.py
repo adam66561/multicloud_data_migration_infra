@@ -2,7 +2,6 @@
 
 import json
 import logging
-from urllib.parse import unquote_plus
 
 from config import load_settings
 from cdc import build_final_state, build_target_path, get_primary_keys, parse_source_location
@@ -23,24 +22,18 @@ def process_parquet(
     target_path = build_target_path(settings, target_prefix, table_name)
 
     if not delta_table_exists(target_path):
-        raise RuntimeError(
-            "Delta table does not exist or is not readable as a Delta table: "
-            f"{schema_name}.{table_name} at {target_path}"
-        )
+        raise RuntimeError(f"Delta table does not exist or is not readable as a Delta table: {schema_name}.{table_name} at {target_path}")
 
-    df = read_parquet(source_bucket, source_key, primary_keys)
+    table, num_rows = read_parquet(source_bucket, source_key, primary_keys)
 
-    if df is None or df.empty:
-        logger.warning(
-            "No data read from S3 object: "
-            f"s3://{source_bucket}/{source_key}"
-        )
+    if table is None:
+        logger.warning(f"No data read from S3 object: s3://{source_bucket}/{source_key}")
         return
 
-    final_df = build_final_state(df, primary_keys)
+    final_table, final_num_rows = build_final_state(table, primary_keys)
 
     metrics, attempt = merge_with_retry(
-        df=final_df,
+        table=final_table,
         target_path=target_path,
         pk_cols=primary_keys,
         max_attempts=3,
@@ -54,8 +47,8 @@ def process_parquet(
             schema_name=schema_name,
             table_name=table_name,
             target_path=target_path,
-            input_rows=len(df),
-            final_state_rows=len(final_df),
+            input_rows=num_rows,
+            final_state_rows=final_num_rows,
             metrics=metrics,
             attempt=attempt,
         )
