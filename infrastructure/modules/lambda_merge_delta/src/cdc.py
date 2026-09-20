@@ -5,7 +5,8 @@ import json
 from typing import TYPE_CHECKING
 
 import boto3
-import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
 
 if TYPE_CHECKING:
     from config import Settings
@@ -108,38 +109,97 @@ def parse_source_location(
 
 
 def build_final_state(
-    df: pd.DataFrame,
+    table: pa.Table,
     pk_cols: list[str],
-) -> pd.DataFrame:
-    payload_cols = [
-        col
-        for col in df.columns
-        if col not in set(pk_cols + ["op"])
-    ]
+) -> tuple[pa.Table | None, int]:
+    if table.num_rows == 0:
+        return table, 0
+    
+    groups: dict[tuple, list[int]] = {}
+
+    for row_index in range(table.num_rows):
+        pk = tuple(
+            table[col][row_index].as_py()
+            for col in pk_cols
+        )
+
+        groups.setdefault(pk, []).append(row_index)
+
     final_rows = []
 
-    for _, group in df.groupby(pk_cols, sort=False, dropna=False):
-        final_row = group.iloc[-1].copy()
+    for indices in groups.values():
+        group = table.take(
+            pa.array(indices, type=pa.int64())
+        )
 
-        # The last event is a delete: delete this PK from Delta.
-        if final_row["op"] == "D":
-            final_rows.append(final_row)
+        last_row = group.slice(
+            group.num_rows - 1,
+            1,
+        )
+
+        last_op = last_row["op"][0].as_py()
+
+        # Last event is DELETE:
+        # preserve the exact delete event.
+        if last_op == "D":
+            final_rows.append(last_row)
             continue
 
-        # For I/U, retain the latest non-null changed value per column.
-        for col in payload_cols:
-            changed_values = group[col].dropna()
+        # Find the latest DELETE.
+        delete_mask = pc.equal(
+            group["op"],
+            pa.scalar("D", type=group["op"].type),
+        )
 
-            final_row[col] = (
-                changed_values.iloc[-1]
-                if not changed_values.empty
-                else pd.NA
+        delete_indices = pc.indices_nonzero(
+            delete_mask
+        ).to_pylist()
+
+        # DELETE resets entity state.
+        # Only events after the most recent DELETE
+        # belong to the current lifecycle.
+        if delete_indices:
+            last_delete_index = delete_indices[-1]
+
+            group = group.slice(
+                last_delete_index + 1
             )
 
-        final_rows.append(final_row)
+        result_arrays = []
 
-    if not final_rows:
-        return df.iloc[0:0].copy()
-    result = pd.DataFrame(final_rows, columns=df.columns).reset_index(drop=True)
+        for col in table.column_names:
+            column_type = table.schema.field(col).type
 
-    return result.astype(df.dtypes.to_dict())
+            if col in pk_cols or col == "op":
+                value = group[col][-1]
+
+            else:
+                non_null_values = pc.drop_null(
+                    group[col]
+                )
+
+                if len(non_null_values) > 0:
+                    value = non_null_values[-1]
+                else:
+                    value = pa.scalar(
+                        None,
+                        type=column_type,
+                    )
+
+            result_arrays.append(
+                pa.array(
+                    [value],
+                    type=column_type,
+                )
+            )
+
+        final_rows.append(
+            pa.Table.from_arrays(
+                result_arrays,
+                names=table.column_names,
+            )
+        )
+
+    final_table = pa.concat_tables(final_rows)
+
+    return final_table, final_table.num_rows

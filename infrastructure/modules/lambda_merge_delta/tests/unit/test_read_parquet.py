@@ -2,24 +2,22 @@
 from io import BytesIO
 from unittest.mock import patch
 
-import pandas as pd
+import pyarrow as pa
 import pytest
 from botocore.exceptions import ClientError
 import sys
 sys.path.insert(0, "../../src")
 from s3_io import read_parquet
 
-
-
-# | S3 object is available and CDC data is valid      | Returns a DataFrame                         |
+# | S3 object is available and CDC data is valid 
 # also mixed case columns are normalized to lower case
-@patch("s3_io.pd.read_parquet")
+@patch("s3_io.pq.read_table")
 @patch("s3_io.s3_client")
-def test_read_parquet_valid_dataframe(s3_client_mock, read_parquet_mock):
+def test_read_parquet_valid_table(s3_client_mock, read_parquet_mock):
     s3_client_mock.get_object.return_value = {
         "Body": BytesIO(b"not-real-parquet-for-this-unit-test")
     }
-    read_parquet_mock.return_value = pd.DataFrame(
+    read_parquet_mock.return_value = pa.table(
         {
             "ORDER_ID": [101, 102, 103],
             "CUSTOMER_ID": [10, 20, 30],
@@ -32,7 +30,7 @@ def test_read_parquet_valid_dataframe(s3_client_mock, read_parquet_mock):
         }
     )
 
-    result = read_parquet(
+    result, num_rows = read_parquet(
         bucket="raw-cdc-bucket",
         key="cdc/sales/orders/part-00001.parquet",
         pk_cols=["order_id", "customer_id"],
@@ -44,24 +42,25 @@ def test_read_parquet_valid_dataframe(s3_client_mock, read_parquet_mock):
     )
 
     read_parquet_mock.assert_called_once()
-    assert list(result.columns) == [
+    assert result.column_names == [
         "order_id",
         "customer_id",
         "op",
         "optime",
     ]
-    assert result["op"].tolist() == ["I", "U", "D"]
-    assert result["order_id"].tolist() == [101, 102, 103]
+    assert result["op"].to_pylist() == ["I", "U", "D"]
+    assert result["order_id"].to_pylist() == [101, 102, 103]
+    assert num_rows == 3
 
 
 # | op, or optime column is missing    | Raises RuntimeError naming missing columns  |
-@patch("s3_io.pd.read_parquet")
+@patch("s3_io.pq.read_table")
 @patch("s3_io.s3_client")
 def test_read_parquet_missing_op_column(s3_client_mock, read_parquet_mock):
     s3_client_mock.get_object.return_value = {
         "Body": BytesIO(b"not-real-parquet-for-this-unit-test")
     }
-    read_parquet_mock.return_value = pd.DataFrame(
+    read_parquet_mock.return_value = pa.table(
         {
             "ORDER_ID": [101, 102, 103],
             "CUSTOMER_ID": [10, 20, 30],
@@ -81,13 +80,13 @@ def test_read_parquet_missing_op_column(s3_client_mock, read_parquet_mock):
         )
 
 # primary key column is missing    | Raises RuntimeError naming missing columns  |
-@patch("s3_io.pd.read_parquet")
+@patch("s3_io.pq.read_table")
 @patch("s3_io.s3_client")
 def test_read_parquet_missing_pk_column(s3_client_mock, read_parquet_mock):
     s3_client_mock.get_object.return_value = {
         "Body": BytesIO(b"not-real-parquet-for-this-unit-test")
     }
-    read_parquet_mock.return_value = pd.DataFrame(
+    read_parquet_mock.return_value = pa.table(
         {
             "CUSTOMER_ID": [10, 20, 30],
             "OP": ["I", "U", "D"],
@@ -108,13 +107,13 @@ def test_read_parquet_missing_pk_column(s3_client_mock, read_parquet_mock):
 
 
 # | One or more primary-key fields are null           | Raises RuntimeError                         |
-@patch("s3_io.pd.read_parquet")
+@patch("s3_io.pq.read_table")
 @patch("s3_io.s3_client")
 def test_read_parquet_null_pk_column(s3_client_mock, read_parquet_mock):
     s3_client_mock.get_object.return_value = {
         "Body": BytesIO(b"not-real-parquet-for-this-unit-test")
     }
-    read_parquet_mock.return_value = pd.DataFrame(
+    read_parquet_mock.return_value = pa.table(
         {
             "ORDER_ID": [101, None, 103],
             "CUSTOMER_ID": [10, 20, 30],
@@ -127,7 +126,7 @@ def test_read_parquet_null_pk_column(s3_client_mock, read_parquet_mock):
         }
     )
 
-    with pytest.raises(RuntimeError, match="Parquet contains rows with null primary keys"):
+    with pytest.raises(RuntimeError, match="Parquet contains rows with null primary key: .*"):
         read_parquet(
             bucket="raw-cdc-bucket",
             key="cdc/sales/orders/part-00001.parquet",
@@ -136,13 +135,13 @@ def test_read_parquet_null_pk_column(s3_client_mock, read_parquet_mock):
         
 
 # | Any unsupported operation—for example X or DELETE | Raises RuntimeError with the invalid values |
-@patch("s3_io.pd.read_parquet")
+@patch("s3_io.pq.read_table")
 @patch("s3_io.s3_client")
 def test_read_parquet_unsupported_op(s3_client_mock, read_parquet_mock):
     s3_client_mock.get_object.return_value = {
         "Body": BytesIO(b"not-real-parquet-for-this-unit-test")
     }
-    read_parquet_mock.return_value = pd.DataFrame(
+    read_parquet_mock.return_value = pa.table(
         {
             "ORDER_ID": [101, 102, 103],
             "CUSTOMER_ID": [10, 20, 30],
@@ -163,10 +162,10 @@ def test_read_parquet_unsupported_op(s3_client_mock, read_parquet_mock):
         )
 
 
-# valid dataframe collumns but empty
-@patch("s3_io.pd.read_parquet")
+# valid table collumns but empty
+@patch("s3_io.pq.read_table")
 @patch("s3_io.s3_client")
-def test_read_parquet_returns_empty_dataframe_when_schema_is_valid(
+def test_read_parquet_returns_empty_table_when_schema_is_valid(
     s3_client_mock,
     read_parquet_mock,
 ):
@@ -174,22 +173,23 @@ def test_read_parquet_returns_empty_dataframe_when_schema_is_valid(
         "Body": BytesIO(b"not-real-parquet-for-this-unit-test")
     }
 
-    read_parquet_mock.return_value = pd.DataFrame(
+    read_parquet_mock.return_value = pa.table(
         {
-            "ORDER_ID": pd.Series(dtype="Int64"),
-            "CUSTOMER_ID": pd.Series(dtype="Int64"),
-            "OP": pd.Series(dtype="string"),
-            "OPTIME": pd.Series(dtype="string"),
+            "ORDER_ID": pa.array([], type=pa.int64()),
+            "CUSTOMER_ID": pa.array([], type=pa.int64()),
+            "OP": pa.array([], type=pa.string()),
+            "OPTIME": pa.array([], type=pa.string()),
         }
     )
 
-    result = read_parquet(
+    result, num_rows = read_parquet(
         bucket="raw-cdc-bucket",
         key="cdc/sales/orders/empty-part.parquet",
         pk_cols=["order_id", "customer_id"],
     )
 
     assert result is None
+    assert num_rows == 0
 
 
 # errors
@@ -212,13 +212,14 @@ def test_read_parquet_returns_none_for_missing_s3_object(
 ):
     s3_client_mock.get_object.side_effect = make_client_error(error_code)
 
-    result = read_parquet(
+    result, num_rows = read_parquet(
         bucket="raw-cdc-bucket",
         key="cdc/sales/orders/missing-file.parquet",
         pk_cols=["order_id", "customer_id"],
     )
 
     assert result is None
+    assert num_rows == 0
 
 @pytest.mark.parametrize(
     "error_code",

@@ -9,7 +9,7 @@ module "lambda_convert_delta" {
   source = "./modules/lambda_convert_delta"
   prefix = join(local.default_separator, [local.prefix, "lambda", "convert", "delta"])
 
-  glue_database_name = ["pasx", "wltuser"]
+  glue_database_name = ["pasx"]
   glue_catalog_id    = data.aws_caller_identity.current.account_id
 
   destination_s3_bucket_id  = module.lambda_tests.s3_bucket_id
@@ -21,13 +21,13 @@ module "lambda_merge_delta" {
   prefix = join(local.default_separator, [local.prefix, "test"])
 
   s3_prefixes_per_schema = {
-    schema1 = {
-      source = "schema1_cdc"
-      target = "schema1_target"
+    pasx = {
+      source = "cdc/pasx"
+      target = "pasx"
     }
-    schema2 = {
-      source = "schema2_cdc"
-      target = "schema2_target"
+    wltuser = {
+      source = "cdc/wltuser"
+      target = "wltuser"
     }
   }
 
